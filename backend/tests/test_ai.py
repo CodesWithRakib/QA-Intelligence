@@ -30,7 +30,10 @@ class FakeProvider:
 
 @pytest.fixture
 def providers(monkeypatch: pytest.MonkeyPatch, db) -> dict[str, FakeProvider]:
-    fakes = {"ollama": FakeProvider("ollama", '{"answer": "local"}'), "anthropic": FakeProvider("anthropic", '{"answer": "paid"}')}
+    fakes = {
+        "ollama": FakeProvider("ollama", '{"answer": "local"}'),
+        "anthropic": FakeProvider("anthropic", '{"answer": "paid"}'),
+    }
     for name, fake in fakes.items():
         monkeypatch.setitem(PROVIDERS, name, fake)
     service.ensure_defaults(db)

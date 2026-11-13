@@ -42,7 +42,9 @@ def test_nextjs_routes_and_monorepo_detection(tmp_path: Path) -> None:
         "devDependencies": {"typescript": "5", "vitest": "2"}, "scripts": {"test": "vitest run"},
     }))  # fmt: skip
     (web / "app" / "page.tsx").write_text("export default function Page() { return null }")
-    (web / "app" / "(shop)" / "products" / "[id]" / "page.tsx").write_text("export default function P() { return process.env.API_URL }")
+    (web / "app" / "(shop)" / "products" / "[id]" / "page.tsx").write_text(
+        "export default function P() { return process.env.API_URL }"
+    )
     (web / "app" / "api" / "orders" / "route.ts").write_text("export async function POST() {}\nexport const GET = async () => {}")
     (tmp_path / "pnpm-workspace.yaml").write_text("packages: ['apps/*']")
     (tmp_path / "legacy").mkdir()

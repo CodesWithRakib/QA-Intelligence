@@ -14,7 +14,13 @@ ALLOWED = ["127.0.0.1:8100"]
 
 @pytest.mark.parametrize(
     "url",
-    ["file:///etc/passwd", "ftp://127.0.0.1:8100/", "gopher://127.0.0.1:8100/", "http://user:pw@127.0.0.1:8100/", "http:///nohost"],
+    [
+        "file:///etc/passwd",
+        "ftp://127.0.0.1:8100/",
+        "gopher://127.0.0.1:8100/",
+        "http://user:pw@127.0.0.1:8100/",
+        "http:///nohost",
+    ],
 )
 def test_rejects_bad_schemes_credentials_and_missing_host(url: str) -> None:
     with pytest.raises(TargetNotAllowed):
