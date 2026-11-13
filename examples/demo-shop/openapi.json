@@ -1,0 +1,114 @@
+{
+  "openapi": "3.0.3",
+  "info": { "title": "Demo Shop API", "version": "1.0.0" },
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "health",
+        "summary": "Liveness probe",
+        "responses": {
+          "200": {
+            "description": "Service is up",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["status"],
+                  "properties": { "status": { "type": "string", "enum": ["ok"] } }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/products": {
+      "get": {
+        "operationId": "listProducts",
+        "summary": "List all products",
+        "responses": {
+          "200": {
+            "description": "Products",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Product" } }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/products/{product_id}": {
+      "get": {
+        "operationId": "getProduct",
+        "summary": "Get one product",
+        "parameters": [
+          { "name": "product_id", "in": "path", "required": true, "schema": { "type": "integer", "example": 1 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Product",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Product" } } }
+          },
+          "404": { "description": "Unknown product" }
+        }
+      }
+    },
+    "/api/orders": {
+      "post": {
+        "operationId": "createOrder",
+        "summary": "Create an order",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/OrderRequest" },
+              "example": { "product_id": 1, "quantity": 2, "discount_percent": 0 }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Order created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["product_id", "quantity", "total"],
+                  "properties": {
+                    "product_id": { "type": "integer" },
+                    "quantity": { "type": "integer" },
+                    "total": { "type": "number" }
+                  }
+                }
+              }
+            }
+          },
+          "422": { "description": "Validation error" }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Product": {
+        "type": "object",
+        "required": ["id", "name", "price"],
+        "properties": {
+          "id": { "type": "integer" },
+          "name": { "type": "string" },
+          "price": { "type": "number" }
+        }
+      },
+      "OrderRequest": {
+        "type": "object",
+        "required": ["product_id", "quantity"],
+        "properties": {
+          "product_id": { "type": "integer", "minimum": 1 },
+          "quantity": { "type": "integer", "minimum": 1, "maximum": 100 },
+          "discount_percent": { "type": "number", "minimum": 0, "maximum": 100 }
+        }
+      }
+    }
+  }
+}

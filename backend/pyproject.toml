@@ -1,0 +1,76 @@
+[project]
+name = "qa-intelligence-backend"
+version = "0.1.0"
+description = "Universal QA Intelligence - backend API, worker and QA engines"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.8",
+    "pydantic-settings>=2.4",
+    "sqlalchemy>=2.0.36",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.2",
+    "httpx>=0.27",
+    "python-multipart>=0.0.9",
+    "pyyaml>=6.0",
+    "jsonschema>=4.23",
+    "playwright>=1.48",
+    "packaging>=24",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "types-pyyaml",
+    "types-jsonschema",
+    "httpx2",
+]
+# Optional paid provider SDK. Not needed for local-only operation.
+anthropic = ["anthropic>=1.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 130
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "SIM"]
+ignore = [
+    "S101", # asserts are fine in tests and for internal invariants
+    "S603", # subprocess is used with fixed argv lists only (never shell=True)
+    "S607", # docker/git are resolved from PATH by design
+    "B008", # FastAPI Depends() defaults
+    "E501", # the formatter owns line length; long literals in `fmt: skip` blocks are deliberate
+    "S108", # /tmp paths refer to tmpfs mounts inside sandbox containers, not the host
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S"]
+"alembic/*" = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::pytest.PytestCollectionWarning"]  # ORM models named Test* are not test classes
+markers = [
+    "docker: needs a running Docker daemon",
+    "browser: needs Playwright chromium",
+    "ollama: needs a running Ollama with at least one model",
+]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+warn_unused_ignores = true
+exclude = ["alembic/", "tests/"]
