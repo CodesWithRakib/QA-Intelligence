@@ -81,6 +81,8 @@ class ContainerSpec:
     timeout_s: int = 300
     limits: Limits = field(default_factory=Limits)
     extra_caps: list[str] = field(default_factory=list)
+    # Only for trusted tools that must write to their own image filesystem (e.g. OWASP ZAP). Never for project code.
+    read_only_root: bool = True
 
 
 def _docker(args: list[str], timeout: int = 60) -> subprocess.CompletedProcess[str]:
@@ -112,7 +114,8 @@ def run_container(spec: ContainerSpec) -> ContainerResult:
     args = [
         "run", "--rm", "--name", name,
         "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-        "--read-only", "--tmpfs", f"/tmp:rw,nosuid,nodev,size={spec.limits.tmpfs_mb}m",
+        *(["--read-only"] if spec.read_only_root else []),
+        "--tmpfs", f"/tmp:rw,nosuid,nodev,size={spec.limits.tmpfs_mb}m",
         "--cpus", str(spec.limits.cpus), "--memory", f"{spec.limits.memory_mb}m",
         "--memory-swap", f"{spec.limits.memory_mb}m",
         "--pids-limit", str(spec.limits.pids_limit),

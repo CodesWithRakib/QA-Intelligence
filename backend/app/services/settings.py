@@ -17,7 +17,7 @@ class ExecutionSettings(BaseModel):
     sandbox_memory_mb: int = Field(default=768, ge=128, le=3072)
     sandbox_pids_limit: int = Field(default=256, ge=32, le=1024)
     sandbox_tmpfs_mb: int = Field(default=256, ge=16, le=2048)
-    sandbox_install_timeout_s: int = Field(default=420, ge=30, le=1800)
+    sandbox_install_timeout_s: int = Field(default=900, ge=30, le=1800)
     sandbox_test_timeout_s: int = Field(default=300, ge=10, le=1800)
     scanner_timeout_s: int = Field(default=600, ge=30, le=1800)
     browser_max_pages: int = Field(default=8, ge=1, le=50)
@@ -26,9 +26,26 @@ class ExecutionSettings(BaseModel):
     api_max_requests_per_run: int = Field(default=150, ge=1, le=1000)
     perf_samples: int = Field(default=10, ge=3, le=50)
     perf_slow_threshold_ms: int = Field(default=800, ge=50, le=30_000)
+    # Cross-browser smoke checks run one browser at a time.
+    browsers: list[str] = Field(default_factory=lambda: ["chromium", "firefox", "webkit"], max_length=3)
+    # Load tests: hard caps. Only planned for local targets unless the plan explicitly authorises more.
+    load_test_vus: int = Field(default=5, ge=1, le=20)
+    load_test_duration_s: int = Field(default=15, ge=5, le=60)
+    # Android: one device session. A physical device is used only when the owner enables it here.
+    android_allow_physical_device: bool = False
+    android_boot_timeout_s: int = Field(default=420, ge=60, le=900)
+    android_explore_actions: int = Field(default=10, ge=1, le=40)
     max_upload_mb: int = Field(default=100, ge=1, le=1024)
     max_extracted_mb: int = Field(default=300, ge=1, le=4096)
     max_files: int = Field(default=20_000, ge=10, le=200_000)
+
+    @field_validator("browsers")
+    @classmethod
+    def _known_browsers(cls, names: list[str]) -> list[str]:
+        unknown = set(names) - {"chromium", "firefox", "webkit"}
+        if unknown or not names:
+            raise ValueError("browsers must be a non-empty subset of chromium, firefox, webkit")
+        return [name for name in ("chromium", "firefox", "webkit") if name in names]
 
     @field_validator("allowed_targets")
     @classmethod

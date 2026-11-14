@@ -10,7 +10,7 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
 from app.discovery.routes import load_openapi
-from app.domain import Category, ResultStatus, Severity
+from app.domain import Category, Classification, ResultStatus, Severity
 from app.engines.base import CaseOutcome, EngineContext, EvidenceDraft, FindingDraft
 from app.engines.http_client import Exchange, PolicyClient, RequestBudgetExceeded
 from app.security.ssrf import TargetNotAllowed
@@ -292,10 +292,81 @@ _CHECKS = {
 }
 
 
+UNTRUSTED_ORIGIN = "https://qai-untrusted-origin.example"
+
+
+def _cors(ctx: EngineContext, client: PolicyClient, case: dict[str, Any]) -> CaseOutcome:
+    """Does the server grant cross-origin access to an origin it has never heard of?"""
+    assert ctx.target_url
+    url = urljoin(ctx.target_url.rstrip("/") + "/", str(case.get("path", "/")).lstrip("/"))
+    exchange = client.request("GET", url, headers={"Origin": UNTRUSTED_ORIGIN})
+    headers = {k.lower(): v for k, v in exchange.headers.items()}
+    allow_origin = headers.get("access-control-allow-origin")
+    credentials = headers.get("access-control-allow-credentials", "").lower() == "true"
+    details = {"url": url, "sent_origin": UNTRUSTED_ORIGIN, "access_control_allow_origin": allow_origin,
+               "access_control_allow_credentials": credentials}  # fmt: skip
+    evidence = [EvidenceDraft("http_exchange", "CORS probe", exchange.transcript())]
+    reflected = allow_origin == UNTRUSTED_ORIGIN
+    if not allow_origin or (allow_origin == "*" and not credentials) or (not reflected and allow_origin != "*"):
+        note = "no CORS headers for an unknown origin" if not allow_origin else f"Access-Control-Allow-Origin: {allow_origin}"
+        return CaseOutcome(ResultStatus.PASSED, note, details, evidence)
+    severity = Severity.HIGH if credentials else Severity.MEDIUM
+    what = "reflects an arbitrary Origin" if reflected else "uses a wildcard"
+    finding = _finding(
+        f"cors:{case.get('path', '/')}", severity, f"CORS policy {what}" + (" and allows credentials" if credentials else ""),
+        f"A request with `Origin: {UNTRUSTED_ORIGIN}` received `Access-Control-Allow-Origin: {allow_origin}`"
+        + (" together with `Access-Control-Allow-Credentials: true`, so any website can read authenticated responses." if credentials
+           else ". Any website can read the responses of this endpoint from a visitor's browser."),
+        exchange, "Answer only for an explicit allowlist of origins; never combine a reflected origin with credentials.",
+        category=Category.SECURITY,
+    )  # fmt: skip
+    finding.classification = Classification.CONFIRMED
+    return CaseOutcome(ResultStatus.FAILED, f"{what} for an untrusted origin", details, evidence, [finding])
+
+
+def _cookie_flags(ctx: EngineContext, client: PolicyClient, _case: dict[str, Any]) -> CaseOutcome:
+    assert ctx.target_url
+    exchange = client.request("GET", ctx.target_url)
+    if not exchange.set_cookies:
+        return CaseOutcome(
+            ResultStatus.NOT_APPLICABLE, "the start page sets no cookies (cookies set after login were not observed)"
+        )
+    https = ctx.target_url.startswith("https://")
+    weak = []
+    for cookie in exchange.set_cookies:
+        name = cookie.split("=", 1)[0].strip()
+        attributes = {part.strip().split("=", 1)[0].lower() for part in cookie.split(";")[1:]}
+        missing = [flag for flag, present in (("HttpOnly", "httponly" in attributes), ("SameSite", "samesite" in attributes),
+                                             ("Secure", "secure" in attributes or not https)) if not present]  # fmt: skip
+        if missing:
+            weak.append({"cookie": name, "missing": missing})
+    details = {"cookies": [c.split("=", 1)[0] for c in exchange.set_cookies], "weak": weak,
+               "note": "Cookie values are not stored. 'Secure' is only expected on HTTPS targets."}  # fmt: skip
+    evidence = [EvidenceDraft("log", "cookie attributes", json.dumps(details, indent=2))]
+    if not weak:
+        return CaseOutcome(
+            ResultStatus.PASSED, f"{len(exchange.set_cookies)} cookie(s) with HttpOnly and SameSite", details, evidence
+        )
+    finding = FindingDraft(
+        key="cookie-flags", category=Category.SECURITY, severity=Severity.LOW,
+        title=f"{len(weak)} cookie(s) without recommended attributes",
+        description="\n".join(f"- {w['cookie']}: missing {', '.join(w['missing'])}" for w in weak)
+                    + "\n\nWhether this matters depends on what each cookie is used for (session cookies must be HttpOnly).",
+        source_tool="api-engine", affected_component=ctx.target_url, confidence=0.7,
+        reproduction_steps=[f"Run `curl -I {ctx.target_url}` and read the Set-Cookie headers."],
+        remediation="Set HttpOnly, SameSite and (on HTTPS) Secure on session and authentication cookies.",
+        facts={"kind": "cookie_flags", "weak": weak}, evidence=evidence, classification=Classification.POTENTIAL,
+    )  # fmt: skip
+    return CaseOutcome(ResultStatus.FAILED, f"{len(weak)} cookie(s) miss recommended attributes", details, evidence, [finding])
+
+
+_EXTRA_CHECKS = {"cors": _cors, "cookie_flags": _cookie_flags}
+
+
 def run_case(ctx: EngineContext, spec: dict[str, Any]) -> CaseOutcome:
     if not ctx.target_url:
         return CaseOutcome(ResultStatus.NOT_APPLICABLE, "no target URL configured for this plan")
-    check = _CHECKS.get(spec.get("check", ""))
+    check = _CHECKS.get(spec.get("check", "")) or _EXTRA_CHECKS.get(spec.get("check", ""))
     if not check:
         return CaseOutcome.blocked(f"unknown API check '{spec.get('check')}'")
     try:

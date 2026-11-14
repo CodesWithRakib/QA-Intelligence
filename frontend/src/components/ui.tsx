@@ -64,7 +64,7 @@ export function StateBadge({ state }: { state: string }) {
 
 export function Card({ title, action, children, className }: { title?: ReactNode; action?: ReactNode; children: ReactNode; className?: string }) {
   return (
-    <section className={cx("rounded-lg border border-line bg-surface", className)}>
+    <section className={cx("min-w-0 rounded-lg border border-line bg-surface", className)}>
       {(title || action) && (
         <header className="flex items-center justify-between gap-3 border-b border-line px-4 py-2.5">
           <h2 className="text-sm font-semibold">{title}</h2>

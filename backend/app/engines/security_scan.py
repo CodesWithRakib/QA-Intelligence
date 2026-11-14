@@ -20,6 +20,7 @@ from app.services.settings import ExecutionSettings
 
 TRIVY_IMAGE = "aquasec/trivy:latest"
 SEMGREP_IMAGE = "semgrep/semgrep:latest"
+GITLEAKS_IMAGE = "zricethezav/gitleaks:latest"
 TRIVY_CACHE_VOLUME = "qai-trivy-cache"
 SCANNER_MEMORY_MB = 1536
 _SEVERITY = {
@@ -296,8 +297,64 @@ def _builtin_secrets(ctx: EngineContext) -> CaseOutcome:
     return CaseOutcome(status, f"{len(findings)} hard-coded credential(s) in {scanned} scanned file(s)", findings=findings)
 
 
+def _gitleaks(ctx: EngineContext, history: bool) -> CaseOutcome:
+    """Secret scan with gitleaks. Values are redacted by the tool; the container has no network.
+
+    ``history=True`` scans the git history of the original local repository (mounted read-only).
+    """
+    if blocked := _precheck(ctx, GITLEAKS_IMAGE):
+        return blocked
+    source = ctx.source_path if history else ctx.workspace
+    if history and (source is None or not (source / ".git").exists()):
+        return CaseOutcome(ResultStatus.NOT_APPLICABLE, "the project was not imported from a local git repository")
+    assert source
+    command = ["detect", "--source", "/src", "--report-format", "json", "--report-path", "/dev/stdout", "--redact",
+               "--exit-code", "0", "--no-banner", "--log-level", "error"]  # fmt: skip
+    if not history:
+        command.append("--no-git")
+    result = sandbox.run_container(ContainerSpec(
+        image=GITLEAKS_IMAGE, command=command, user="0:0", network=False, mounts=[Mount(str(source), "/src")],
+        timeout_s=ctx.settings.scanner_timeout_s, limits=Limits.from_settings(ctx.settings, memory_mb=1024),
+        # The repository belongs to another user id; git refuses to read it without this.
+        env={"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "safe.directory", "GIT_CONFIG_VALUE_0": "*"},
+    ))  # fmt: skip
+    start = result.stdout.find("[")
+    try:
+        leaks = json.loads(result.stdout[start:]) if start >= 0 else None
+    except json.JSONDecodeError:
+        leaks = None
+    if leaks is None:
+        return CaseOutcome.blocked(f"gitleaks did not complete (exit {result.exit_code}): {result.output[-400:]}")
+    findings = []
+    for leak in leaks:
+        file, line, rule = str(leak.get("File", "")), leak.get("StartLine", 0), str(leak.get("RuleID", ""))
+        commit = str(leak.get("Commit", ""))[:12]
+        where = f"{file}:{line}" + (f" (commit {commit})" if commit else "")
+        still_present = bool(commit) and ctx.workspace is not None and (ctx.workspace / file).is_file()
+        findings.append(FindingDraft(
+            key=f"gitleaks:{rule}:{file}:{leak.get('Fingerprint') or line}", category=Category.SECURITY,
+            severity=Severity.HIGH, title=f"Possible secret ({rule}) in {where}"[:400],
+            description=f"{leak.get('Description', 'Secret pattern matched')}. The value is redacted here."
+                        + (f" Found in git history (commit {commit}, {str(leak.get('Date', ''))[:10]})." if commit else "")
+                        + (" The file still exists in the current tree." if still_present else ""),
+            source_tool="gitleaks-history" if history else "gitleaks", affected_component=where, confidence=0.7,
+            reproduction_steps=[f"Run `gitleaks detect --redact{'' if history else ' --no-git'}` in the repository.",
+                                f"Inspect {where}."],
+            remediation="If this is a real credential: rotate it first, then remove it from the code"
+                        + (" and purge it from git history (git filter-repo)." if history else "."),
+            facts={"kind": "secret", "file": file, "line": line, "rule": rule, "commit": commit, "in_history": history},
+        ))  # fmt: skip
+    status = ResultStatus.FAILED if findings else ResultStatus.PASSED
+    scope = "git history" if history else "working tree"
+    return CaseOutcome(status, f"{len(findings)} possible secret(s) in the {scope}", {"tool": GITLEAKS_IMAGE}, findings=findings)
+
+
 def static_analysis(ctx: EngineContext, spec: dict[str, Any]) -> CaseOutcome:
     tool = spec.get("tool")
+    if tool == "gitleaks":
+        return _gitleaks(ctx, history=False)
+    if tool == "gitleaks-history":
+        return _gitleaks(ctx, history=True)
     if tool == "semgrep":
         return _semgrep(ctx)
     if tool == "trivy-secret":

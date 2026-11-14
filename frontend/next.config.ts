@@ -1,10 +1,4 @@
-import path from "node:path";
-
-import { loadEnvConfig } from "@next/env";
 import type { NextConfig } from "next";
-
-// Single source of configuration: the repository-level .env (never committed).
-loadEnvConfig(path.join(process.cwd(), ".."));
 
 const securityHeaders = [
   { key: "X-Content-Type-Options", value: "nosniff" },

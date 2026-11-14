@@ -9,9 +9,10 @@
  */
 import type { NextRequest } from "next/server";
 
+import { serverEnv } from "@/lib/server-env";
+
 export const dynamic = "force-dynamic";
 
-const BACKEND = process.env.QAI_BACKEND_URL ?? "http://127.0.0.1:8000";
 const SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/;
 const LOCAL_HOST = /^(localhost|127\.0\.0\.1)(:\d+)?$/;
 const FORWARDED_RESPONSE_HEADERS = ["content-type", "content-disposition", "x-content-type-options"];
@@ -21,7 +22,8 @@ function reject(status: number, detail: string): Response {
 }
 
 async function proxy(request: NextRequest, context: { params: Promise<{ path: string[] }> }): Promise<Response> {
-  const token = process.env.QAI_API_TOKEN;
+  const token = serverEnv("QAI_API_TOKEN");
+  const backend = serverEnv("QAI_BACKEND_URL") ?? "http://127.0.0.1:8000";
   if (!token) return reject(500, "QAI_API_TOKEN is not configured (run scripts/setup-env.ps1)");
 
   const host = request.headers.get("host") ?? "";
@@ -44,7 +46,7 @@ async function proxy(request: NextRequest, context: { params: Promise<{ path: st
 
   let upstream: Response;
   try {
-    upstream = await fetch(`${BACKEND}/api/${path.join("/")}${request.nextUrl.search}`, {
+    upstream = await fetch(`${backend}/api/${path.join("/")}${request.nextUrl.search}`, {
       method: request.method,
       headers,
       body: hasBody ? await request.arrayBuffer() : undefined,

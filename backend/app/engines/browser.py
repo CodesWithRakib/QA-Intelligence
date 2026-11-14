@@ -16,12 +16,23 @@ from urllib.parse import urldefrag, urljoin, urlsplit
 from playwright.sync_api import BrowserContext, Page, Request, Route, ViewportSize, sync_playwright
 from playwright.sync_api import Error as PlaywrightError
 
-from app.domain import Category, ResultStatus, Severity
+from app.domain import Category, Classification, ResultStatus, Severity
 from app.engines.base import CaseOutcome, EngineContext, EvidenceDraft, FindingDraft
 from app.security.ssrf import TargetNotAllowed, validate_subresource, validate_target
 
 AXE_SOURCE = Path(__file__).parent / "vendor" / "axe.min.js"
-VIEWPORTS: dict[str, ViewportSize] = {"mobile": {"width": 375, "height": 667}, "tablet": {"width": 768, "height": 1024}}
+VIEWPORTS: dict[str, ViewportSize] = {
+    "small-mobile": {"width": 320, "height": 568},
+    "mobile": {"width": 375, "height": 667},
+    "large-mobile": {"width": 430, "height": 932},
+    "tablet": {"width": 768, "height": 1024},
+    "laptop": {"width": 1366, "height": 768},
+    "desktop": {"width": 1920, "height": 1080},
+    "large-desktop": {"width": 2560, "height": 1440},
+}
+TOUCH_VIEWPORTS = {"small-mobile", "mobile", "large-mobile", "tablet"}
+BROWSERS = ("chromium", "firefox", "webkit")
+MIN_TOUCH_TARGET_PX = 24  # WCAG 2.2 AA (2.5.8 Target Size, minimum)
 DESKTOP: ViewportSize = {"width": 1366, "height": 768}
 _IMPACT = {
     "critical": Severity.HIGH,
@@ -103,14 +114,19 @@ def _guard(allowed: list[str], log: PageLog) -> Any:
 
 
 @contextmanager
-def _session(ctx: EngineContext, viewport: ViewportSize) -> Iterator[tuple[BrowserContext, Page, PageLog]]:
+def _session(
+    ctx: EngineContext, viewport: ViewportSize, browser_name: str = "chromium", *, allow_service_workers: bool = False
+) -> Iterator[tuple[BrowserContext, Page, PageLog]]:
+    """One isolated browser context. Only one browser process runs at a time (resource policy)."""
+    if browser_name not in BROWSERS:
+        raise PlaywrightError(f"unsupported browser '{browser_name}'")
     log = PageLog()
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
+        browser = getattr(playwright, browser_name).launch(headless=True)
         try:
             context = browser.new_context(
-                viewport=viewport, bypass_csp=True, service_workers="block", accept_downloads=False,
-                user_agent="QA-Intelligence/0.1 (authorised local QA; Playwright Chromium)",
+                viewport=viewport, bypass_csp=True, accept_downloads=False,
+                service_workers="allow" if allow_service_workers else "block",
             )  # fmt: skip
             context.set_default_timeout(ctx.settings.browser_page_timeout_s * 1000)
             context.route("**/*", _guard(ctx.settings.allowed_targets, log))
@@ -165,7 +181,8 @@ def _origin(url: str) -> str:
 
 def _page_health(ctx: EngineContext, spec: dict[str, Any]) -> CaseOutcome:
     url = _url(ctx, spec.get("path", "/"))
-    with _session(ctx, DESKTOP) as (_, page, log):
+    engine = str(spec.get("browser", "chromium"))
+    with _session(ctx, DESKTOP, engine) as (_, page, log):
         status = _goto(page, url)
         evidence = [_shot(ctx, page, f"page {url}")]
         title = page.title()
@@ -262,10 +279,28 @@ def _responsive(ctx: EngineContext, spec: dict[str, Any]) -> CaseOutcome:
             if status is None or status >= 400:
                 return CaseOutcome.blocked(f"page returned HTTP {status}; layout cannot be assessed")
             measured = page.evaluate(_OVERFLOW_JS)
+            small_targets = page.evaluate(_TOUCH_TARGET_JS, MIN_TOUCH_TARGET_PX) if name in TOUCH_VIEWPORTS else []
             shot = _shot(ctx, page, f"{name} {viewport['width']}x{viewport['height']} {url}")
         evidence.append(shot)
         overflow = measured["scrollWidth"] > measured["innerWidth"] + 1
-        details["viewports"][name] = {**viewport, **measured, "horizontal_overflow": overflow}
+        details["viewports"][name] = {
+            **viewport,
+            **measured,
+            "horizontal_overflow": overflow,
+            "small_touch_targets": small_targets,
+        }
+        if small_targets and name == "mobile":
+            findings.append(FindingDraft(
+                key=f"touch-target:{spec.get('path', '/')}", category=Category.ACCESSIBILITY, severity=Severity.LOW,
+                title=f"{len(small_targets)} touch target(s) smaller than {MIN_TOUCH_TARGET_PX}px on mobile",
+                description="Interactive elements below the WCAG 2.2 minimum target size:\n"
+                            + "\n".join(f"- <{t['tag']}> '{t['label']}' {t['width']}x{t['height']}px" for t in small_targets[:20]),
+                source_tool="playwright", affected_component=url, confidence=0.8,
+                reproduction_steps=[f"Open {url} at {viewport['width']}x{viewport['height']}.", "Measure the listed elements."],
+                remediation="Give interactive elements at least 24x24 CSS px (44x44 recommended for touch).",
+                facts={"kind": "touch_target", "viewport": name, "targets": small_targets[:40]}, evidence=[shot],
+                classification=Classification.CONFIRMED,
+            ))  # fmt: skip
         if overflow:
             offenders = ", ".join(f"<{o['tag']}{'#' + o['id'] if o['id'] else ''}>" for o in measured["offenders"])
             findings.append(FindingDraft(
@@ -365,6 +400,21 @@ def _web_performance(ctx: EngineContext, spec: dict[str, Any]) -> CaseOutcome:
     )  # fmt: skip
 
 
+_TOUCH_TARGET_JS = """(minimum) => {
+  const found = [];
+  for (const el of document.querySelectorAll('a[href], button, input:not([type=hidden]), select, textarea, [role=button]')) {
+    const rect = el.getBoundingClientRect();
+    const style = getComputedStyle(el);
+    if (rect.width === 0 || rect.height === 0 || style.visibility === 'hidden' || style.display === 'inline') continue;
+    if (rect.width < minimum || rect.height < minimum) {
+      found.push({tag: el.tagName.toLowerCase(), label: (el.innerText || el.getAttribute('aria-label') || el.name || '').trim().slice(0, 40),
+                  width: Math.round(rect.width), height: Math.round(rect.height)});
+      if (found.length >= 40) break;
+    }
+  }
+  return found;
+}"""
+
 _CHECKS = {
     "page_health": _page_health,
     "crawl": _crawl,
@@ -372,6 +422,11 @@ _CHECKS = {
     "accessibility": _accessibility,
     "web_performance": _web_performance,
 }
+
+
+def register(name: str, check: Any) -> None:
+    """Add a browser check implemented in another module (see browser_extra.py)."""
+    _CHECKS[name] = check
 
 
 def run_case(ctx: EngineContext, spec: dict[str, Any]) -> CaseOutcome:

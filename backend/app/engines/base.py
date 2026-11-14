@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from app.domain import Category, ResultStatus, Severity
+from app.domain import Category, Classification, ResultStatus, Severity
 from app.services.settings import ExecutionSettings
 
 MAX_INLINE_EVIDENCE = 60_000
@@ -37,6 +37,10 @@ class FindingDraft:
     remediation: str = ""
     facts: dict[str, Any] = field(default_factory=dict)
     evidence: list[EvidenceDraft] = field(default_factory=list)
+    # Tool output is a *potential* defect until the platform has observed the behaviour itself.
+    classification: Classification = Classification.POTENTIAL
+    expected: str = ""
+    actual: str = ""
 
     @property
     def fingerprint(self) -> str:
@@ -65,6 +69,14 @@ class EngineContext:
     evidence_dir: Path  # per-run directory for artifacts
     inventory: dict[str, Any]
     allow_mutations: bool = False
+    # Non-secret project test configuration (entry URLs, login selectors, secret references).
+    project_config: dict[str, Any] = field(default_factory=dict)
+    # Original location of a local-folder import (read-only use, e.g. git history secret scan).
+    source_path: Path | None = None
+    # Approved visual baselines: key -> absolute file path.
+    baselines: dict[str, Path] = field(default_factory=dict)
+    # Shared between the cases of one run (e.g. a prepared sandbox volume). Cleaned up by adapters.
+    run_cache: dict[str, Any] = field(default_factory=dict)
 
 
 def mask_secret(value: str) -> str:

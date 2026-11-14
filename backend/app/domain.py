@@ -8,7 +8,8 @@ class SourceKind(StrEnum):
     ZIP = "zip"
     URL = "url"
     OPENAPI = "openapi"
-    GIT = "git"  # declared for the compatibility matrix; ingestion not implemented in the MVP
+    GIT = "git"
+    APK = "apk"
 
 
 class ResultStatus(StrEnum):
@@ -46,6 +47,10 @@ class Category(StrEnum):
     PERFORMANCE = "performance"
     ACCESSIBILITY = "accessibility"
     PRODUCT = "product"
+    VISUAL = "visual"
+    BUILD = "build"
+    COMPATIBILITY = "compatibility"
+    ANDROID = "android"
 
 
 class Engine(StrEnum):
@@ -55,6 +60,11 @@ class Engine(StrEnum):
     STATIC_ANALYSIS = "static_analysis"
     PROJECT_TESTS = "project_tests"
     DATABASE_STATIC = "database_static"
+    LIGHTHOUSE = "lighthouse"
+    LOAD_TEST = "load_test"
+    DAST = "dast"
+    ANDROID_STATIC = "android_static"
+    ANDROID_DYNAMIC = "android_dynamic"
     MANUAL = "manual"  # documented case with no automated engine -> always not_tested
 
 
@@ -94,6 +104,30 @@ class ExecutionStatus(StrEnum):
     VERIFIED = "verified"
     FAILED = "failed"
     REVIEW_REJECTED = "review_rejected"
+
+
+class Readiness(StrEnum):
+    """Whether a check can actually be executed right now. Computed, never assumed."""
+
+    READY = "ready"
+    PARTIALLY_READY = "partially_ready"
+    REQUIRES_CONFIGURATION = "requires_configuration"
+    REQUIRES_CREDENTIALS = "requires_credentials"
+    REQUIRES_SOURCE = "requires_source_access"
+    REQUIRES_DEVICE = "requires_device"
+    REQUIRES_ENVIRONMENT = "requires_test_environment"
+    BLOCKED = "blocked"
+    NOT_APPLICABLE = "not_applicable"
+
+
+class Classification(StrEnum):
+    """How much a finding has been established. Scanner output is not a confirmed defect by default."""
+
+    CONFIRMED = "confirmed_defect"  # reproduced deterministically by the platform (observed behaviour)
+    POTENTIAL = "potential_defect"  # reported by a tool/heuristic, not independently reproduced
+    AI_HYPOTHESIS = "ai_hypothesis"
+    ENVIRONMENT = "environment_failure"
+    FALSE_POSITIVE = "false_positive"
 
 
 class Origin(StrEnum):

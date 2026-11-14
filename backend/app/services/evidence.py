@@ -48,6 +48,8 @@ def upsert_finding(db: Session, draft: FindingDraft, *, project_id: uuid.UUID, v
     finding.affected_component = draft.affected_component[:512]
     finding.confidence = draft.confidence
     finding.remediation = draft.remediation
+    finding.classification = draft.classification.value
+    finding.expected_behavior, finding.actual_behavior = draft.expected, draft.actual
     finding.facts = draft.facts
     finding.last_seen_at = datetime.now(UTC)
     db.flush()

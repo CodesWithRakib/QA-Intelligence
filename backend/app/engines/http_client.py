@@ -2,7 +2,7 @@
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urljoin
 
@@ -28,6 +28,7 @@ class Exchange:
     headers: dict[str, str]
     body: bytes
     request_body: Any = None
+    set_cookies: list[str] = field(default_factory=list)
 
     def json(self) -> Any:
         return json.loads(self.body)
@@ -55,14 +56,15 @@ class PolicyClient:
     def __exit__(self, *_: object) -> None:
         self._client.close()
 
-    def request(self, method: str, url: str, *, json_body: Any = None, follow: bool = True) -> Exchange:
+    def request(self, method: str, url: str, *, json_body: Any = None, follow: bool = True,
+                headers: dict[str, str] | None = None) -> Exchange:  # fmt: skip
         started = time.perf_counter()
         for _ in range(MAX_REDIRECTS + 1):
             if self._remaining <= 0:
                 raise RequestBudgetExceeded("per-run request limit reached")
             self._remaining -= 1
             validate_target(url, self._allowed)
-            with self._client.stream(method, url, json=json_body) as response:
+            with self._client.stream(method, url, json=json_body, headers=headers) as response:
                 body = b""
                 for chunk in response.iter_bytes():
                     body += chunk
@@ -75,5 +77,6 @@ class PolicyClient:
                 return Exchange(
                     method, url, response.status_code, (time.perf_counter() - started) * 1000,
                     dict(response.headers), body[:MAX_BODY_BYTES], json_body,
+                    response.headers.get_list("set-cookie"),
                 )  # fmt: skip
         raise httpx.TooManyRedirects(f"more than {MAX_REDIRECTS} redirects")

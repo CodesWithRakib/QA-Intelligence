@@ -97,6 +97,7 @@ def parse_package_json(path: Path, rel_dir: str) -> ComponentInfo | None:
         details={
             "manifest": "package.json",
             "package_manager": manager or str(data.get("packageManager", "")).split("@")[0] or "npm (no lockfile)",
+            "package_manager_spec": str(data.get("packageManager", ""))[:60],
             "has_lockfile": manager is not None,
             "scripts": {k: str(v)[:300] for k, v in scripts.items()},
             "test_frameworks": tests,

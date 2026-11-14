@@ -14,7 +14,8 @@ catch { Write-Bad "API not reachable on port $apiPort ($($_.Exception.Message)).
 
 foreach ($check in $health.checks.PSObject.Properties) {
     $label = "{0}: {1}" -f $check.Name, $check.Value.detail
-    if ($check.Value.ok) { Write-Ok $label } elseif ($check.Value.optional) { Write-Note "$label (optional)" } else { Write-Bad $label }
+    $optional = [bool]($check.Value.PSObject.Properties['optional'] -and $check.Value.optional)
+    if ($check.Value.ok) { Write-Ok $label } elseif ($optional) { Write-Note "$label (optional)" } else { Write-Bad $label }
 }
 try {
     $page = Invoke-WebRequest 'http://127.0.0.1:3000/' -TimeoutSec 20 -UseBasicParsing

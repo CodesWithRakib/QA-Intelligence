@@ -26,6 +26,8 @@ class Project(Base, IdMixin, CreatedMixin):
     description: Mapped[str] = mapped_column(Text, default="")
     target_url: Mapped[str | None] = mapped_column(String(2048))
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Non-secret test configuration: entry URLs, login selectors, secret *references* (env var names).
+    test_config: Mapped[JsonDict] = mapped_column(default=dict, server_default="{}")
 
     sources: Mapped[list["ProjectSource"]] = relationship(back_populates="project", cascade="all, delete-orphan")
     versions: Mapped[list["ProjectVersion"]] = relationship(

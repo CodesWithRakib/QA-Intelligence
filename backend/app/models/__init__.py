@@ -11,7 +11,7 @@ from app.models.project import (
     Route,
     User,
 )
-from app.models.qa import Evidence, Finding, TestCase, TestPlan, TestResult, TestRun
+from app.models.qa import Evidence, Finding, TestCase, TestPlan, TestResult, TestRun, VisualBaseline
 from app.models.repair import RegressionResult, RepairExecution, RepairProposal
 from app.models.system import (
     AgentExecution,
@@ -53,4 +53,5 @@ __all__ = [
     "TestResult",
     "TestRun",
     "User",
+    "VisualBaseline",
 ]

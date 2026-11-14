@@ -24,6 +24,7 @@ data/
 backups/
 
 # Tooling
+.tools/
 .vscode/
 .idea/
 *.log
