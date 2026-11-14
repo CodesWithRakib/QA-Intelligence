@@ -31,6 +31,10 @@ _PSS = re.compile(r"TOTAL(?: PSS)?:?\s+(\d+)")
 _JANK = re.compile(r"Janky frames:\s*(\d+)\s*\(([\d.]+)%\)")
 _FRAMES = re.compile(r"Total frames rendered:\s*(\d+)")
 MIN_TOUCH_TARGET_DP = 48
+ANR_DIALOG_TEXT = "isn't responding"
+# Items of list containers receive clicks through their parent, so they are interactive without clickable="true".
+LIST_CONTAINERS = ("android.widget.ListView", "android.widget.GridView", "androidx.recyclerview.widget.RecyclerView")
+INTERACTIVE_XPATH = "//*[@clickable='true'] | " + " | ".join(f"//{name}/*" for name in LIST_CONTAINERS)
 COLD_START_SLOW_MS = 5000
 
 
@@ -202,26 +206,43 @@ def _ui_exploration(ctx: EngineContext, device: Device, info: android_static.Apk
         "platformName": "Android", "appium:automationName": "UiAutomator2", "appium:udid": device.serial,
         "appium:appPackage": info.package, "appium:appActivity": info.launch_activity or None, "appium:noReset": True,
         "appium:autoGrantPermissions": True, "appium:newCommandTimeout": 180, "appium:disableWindowAnimation": True,
+            # Generous timeouts: an emulator on a memory-constrained host installs and starts slowly.
+            "appium:adbExecTimeout": 180000,
+            "appium:uiautomator2ServerInstallTimeout": 180000,
+            "appium:uiautomator2ServerLaunchTimeout": 180000,
+            "appium:androidInstallTimeout": 180000,
     })  # fmt: skip
     device.clear_logcat()
     evidence: list[EvidenceDraft] = []
     actions: list[dict[str, Any]] = []
     screens: set[str] = set()
+    anr_dialog_seen = False
     try:
         driver = webdriver.Remote(url, options=options)
     except WebDriverException as exc:
         return CaseOutcome.blocked(f"Appium could not start a UiAutomator2 session: {str(exc)[:300]}")
     try:
         driver.implicitly_wait(2)
-        screens.add(str(driver.current_activity))
+        # A system "isn't responding" dialog is an ANR. Choose "Wait" (never "Close app") and remember it.
         hierarchy = driver.page_source
+        for _ in range(3):
+            if ANR_DIALOG_TEXT not in hierarchy:
+                break
+            anr_dialog_seen = True
+            for button in driver.find_elements(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("Wait")'):
+                button.click()
+            time.sleep(5)
+            hierarchy = driver.page_source
+        screens.add(str(driver.current_activity))
         evidence.append(EvidenceDraft("tool_output", "UI hierarchy of the first screen", hierarchy[:50_000]))
         ctx.run_cache["android_hierarchies"] = [hierarchy]
         first = device.screenshot(ctx, "first screen")
         if first:
             evidence.append(first)
         labels = []
-        for element in driver.find_elements(AppiumBy.XPATH, "//*[@clickable='true']"):
+        for element in driver.find_elements(AppiumBy.XPATH, INTERACTIVE_XPATH):
+            if element.get_attribute("package") != info.package:
+                continue  # system UI (dialogs, status bar) is not part of the app under test
             label = str(element.get_attribute("text") or element.get_attribute("content-desc") or "").strip()
             if label and label not in labels:
                 labels.append(label)
@@ -229,7 +250,7 @@ def _ui_exploration(ctx: EngineContext, device: Device, info: android_static.Apk
             action: dict[str, Any] = {"tap": label}
             try:
                 target = driver.find_element(AppiumBy.ANDROID_UIAUTOMATOR,
-                                             f'new UiSelector().clickable(true).textContains("{label[:40]}")')  # fmt: skip
+                                             f'new UiSelector().textContains("{label[:40]}")')  # fmt: skip
                 target.click()
                 time.sleep(1)
                 action["activity"] = str(driver.current_activity)
@@ -260,11 +281,22 @@ def _ui_exploration(ctx: EngineContext, device: Device, info: android_static.Apk
             log.warning("appium session did not close cleanly")
     details = {"device": device.profile(), "actions": actions, "screens_visited": sorted(screens),
                "clickable_labels_found": len(labels), "action_limit": ctx.settings.android_explore_actions,
+               "anr_dialog_seen": anr_dialog_seen,
                "scope": "taps on the first screen only; no login, no data entry"}  # fmt: skip
     if crashed := _crash_outcome(device, info, ctx, "exploration", "tapping through the first screen", evidence, details):
         return crashed
+    if anr_dialog_seen:
+        # Observed, but on an emulator this is as likely to be host load as an app defect: reported as potential.
+        return CaseOutcome(
+            ResultStatus.FAILED, "the system showed an 'app isn't responding' dialog during exploration", details, evidence,
+            [_finding("anr-dialog", Severity.MEDIUM, "App stopped responding (ANR dialog) during UI exploration",
+                      "Android displayed its 'isn't responding' dialog. On a software-rendered emulator sharing a busy host "
+                      "this can be caused by the test environment; confirm on a real device.", info, device, evidence,
+                      "Move long work off the main thread; re-test on a physical device to confirm.",
+                      classification=Classification.POTENTIAL)],
+        )  # fmt: skip
     if not actions:
-        return CaseOutcome.blocked("Appium connected but found no labelled clickable element on the first screen")
+        return CaseOutcome.blocked("Appium connected but found no labelled interactive element of the app on the first screen")
     return CaseOutcome(ResultStatus.PASSED, f"{len(actions)} UI action(s) on {len(screens)} screen(s) without a crash",
                        details, evidence)  # fmt: skip
 
@@ -334,8 +366,10 @@ def _accessibility(ctx: EngineContext, device: Device, info: android_static.ApkI
             root = ET.fromstring(xml_text)  # noqa: S314 - produced by uiautomator on the test device
         except ET.ParseError:
             continue
+        list_items = {child for parent in root.iter() if parent.get("class") in LIST_CONTAINERS for child in parent}
         for node in root.iter():
-            if node.get("clickable") != "true" or node.get("package") not in (info.package, None):
+            interactive = node.get("clickable") == "true" or node in list_items
+            if not interactive or node.get("package") not in (info.package, None):
                 continue
             inspected += 1
             identity = node.get("resource-id") or node.get("class") or "node"

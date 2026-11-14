@@ -8,8 +8,10 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from app.domain import ResultStatus
-from app.engines.base import CaseOutcome
+from app.adapters.base import ReadinessReport
+from app.adapters.web import ProjectPipelineAdapter, WebSecurityAdapter
+from app.domain import Readiness, ResultStatus
+from app.engines.base import CaseOutcome, EngineContext
 from app.main import app
 from app.models import AuditEvent, Finding, Job, TestRun
 from app.runs import service as runs
@@ -58,7 +60,7 @@ def test_import_validation_errors(client: TestClient) -> None:
     missing_file = client.post("/api/projects/import", data={"name": "X", "kind": "zip"})
     assert missing_file.status_code == 422
     git = client.post("/api/projects/import", data={"name": "X", "kind": "git"})
-    assert git.status_code == 422 and "not supported" in git.json()["detail"]
+    assert git.status_code == 422 and "local git repository" in git.json()["detail"]
     assert client.get("/api/projects").json()["total"] == 0
 
 
@@ -101,24 +103,31 @@ def test_settings_validation_and_pagination_bounds(client: TestClient) -> None:
     assert client.get(f"/api/projects/{uuid.uuid4()}").status_code == 404
 
 
+def _stub_adapters(monkeypatch: pytest.MonkeyPatch, *, crash_dependency_scan: bool = False) -> None:
+    """Replace Docker-backed execution with deterministic stand-ins. The built-in secret check stays real,
+    so result persistence, evidence masking and finding handling are exercised with genuine output."""
+    real_execute = WebSecurityAdapter.execute
+
+    def security(self: WebSecurityAdapter, ctx: EngineContext, spec: dict) -> CaseOutcome:
+        if spec.get("tool") == "builtin-secrets":
+            return real_execute(self, ctx, spec)
+        if spec["_engine"] == "dependency_scan" and crash_dependency_scan:
+            raise RuntimeError("scanner exploded")
+        return CaseOutcome.blocked("stubbed")
+
+    for adapter in (WebSecurityAdapter, ProjectPipelineAdapter):
+        monkeypatch.setattr(adapter, "readiness", lambda self, ctx, spec: ReadinessReport())
+    monkeypatch.setattr(WebSecurityAdapter, "execute", security)
+    monkeypatch.setattr(ProjectPipelineAdapter, "execute", lambda self, ctx, spec: CaseOutcome.blocked("Docker is not running"))
+
+
 def test_run_reports_only_real_outcomes(client: TestClient, db, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Static-only plan executed by the real run service; Docker-backed engines are replaced by
-    deterministic stand-ins so the state handling itself is what is tested."""
     project = _import_demo(client)
     plan = client.post("/api/plans", json={"project_id": project["id"]}).json()
+    by_tool = {c["spec"].get("tool"): c["key"] for c in plan["cases"]}
     sast = next(c for c in plan["cases"] if c["spec"].get("tool") == "semgrep")
     assert client.patch(f"/api/plans/{plan['id']}/cases/{sast['id']}", json={"enabled": False}).json()["enabled"] is False
-
-    def crash(*_: object) -> CaseOutcome:
-        raise RuntimeError("scanner exploded")
-
-    monkeypatch.setitem(runs._ENGINES, "dependency_scan", crash)
-    monkeypatch.setitem(runs._ENGINES, "project_tests", lambda *_: CaseOutcome.blocked("Docker is not running"))
-    real_static = runs._ENGINES["static_analysis"]
-    monkeypatch.setitem(
-        runs._ENGINES, "static_analysis",
-        lambda ctx, spec: real_static(ctx, spec) if spec["tool"] == "builtin-secrets" else CaseOutcome.blocked("no docker"),
-    )  # fmt: skip
+    _stub_adapters(monkeypatch, crash_dependency_scan=True)
 
     queued = client.post(f"/api/plans/{plan['id']}/runs")
     assert queued.status_code == 202 and queued.json()["status"] == "queued"
@@ -130,15 +139,17 @@ def test_run_reports_only_real_outcomes(client: TestClient, db, monkeypatch: pyt
     assert run["status"] == "completed" and len(run["results"]) == run["planned_cases"]
     assert states["SEC-DEP-001"] == "blocked"  # crashed engine: never passed, never hidden
     assert "scanner exploded" in next(r for r in run["results"] if r["case"]["key"] == "SEC-DEP-001")["message"]
-    assert states["SEC-SAST-001"] == "skipped"  # disabled by the owner
+    assert states[by_tool["semgrep"]] == "skipped"  # disabled by the owner
     assert all(states[k] == "not_tested" for k in states if k.startswith("MAN-"))
-    assert states["SEC-SECRET-002"] == "failed"  # built-in check really found the seeded credential
+    assert states[by_tool["builtin-secrets"]] == "failed"  # built-in check really found the seeded credential
     assert run["summary"]["passed"] == sum(1 for s in states.values() if s == "passed")
     assert run["summary"]["total"] == len(states) and set(run["summary"]) == {*[s.value for s in ResultStatus], "total"}
+    assert run["readiness"]["SEC-DEP-001"]["status"] == "ready" and run["progress"]["cleanup"] is not None
 
     finding = db.scalar(select(Finding).where(Finding.source_tool == "builtin-secrets"))
     detail = client.get(f"/api/findings/{finding.id}").json()
     assert detail["severity"] == "high" and detail["reproduction_steps"] and detail["verification_status"] == "unverified"
+    assert detail["classification"] == "potential_defect"  # a heuristic match is not a confirmed defect
     assert "demo-admin-12345" not in str(detail["evidence"]) and "de**" in detail["evidence"][0]["content"]
 
     report = client.post(f"/api/runs/{run['id']}/report").json()
@@ -146,20 +157,63 @@ def test_run_reports_only_real_outcomes(client: TestClient, db, monkeypatch: pyt
     assert report["data"]["counts"]["blocked"] == run["summary"]["blocked"]
 
 
-def test_rerun_does_not_duplicate_findings(client: TestClient, db, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_rerun_does_not_duplicate_findings_and_runs_can_be_compared(
+    client: TestClient, db, monkeypatch: pytest.MonkeyPatch
+) -> None:
     project = _import_demo(client)
     plan = client.post("/api/plans", json={"project_id": project["id"]}).json()
-    for engine in ("dependency_scan", "project_tests"):
-        monkeypatch.setitem(runs._ENGINES, engine, lambda *_: CaseOutcome.blocked("stubbed"))
-    real_static = runs._ENGINES["static_analysis"]
-    monkeypatch.setitem(
-        runs._ENGINES, "static_analysis",
-        lambda ctx, spec: real_static(ctx, spec) if spec["tool"] == "builtin-secrets" else CaseOutcome.blocked("stubbed"),
-    )  # fmt: skip
+    _stub_adapters(monkeypatch)
+    run_ids = []
     for _ in range(2):
-        run_id = client.post(f"/api/plans/{plan['id']}/runs").json()["id"]
-        runs.execute_run(uuid.UUID(run_id))
+        run_ids.append(client.post(f"/api/plans/{plan['id']}/runs").json()["id"])
+        runs.execute_run(uuid.UUID(run_ids[-1]))
     assert len(db.scalars(select(TestRun)).all()) == 2
     assert len(db.scalars(select(Finding).where(Finding.source_tool == "builtin-secrets")).all()) == 1
     listed = client.get("/api/findings", params={"category": "security", "q": "credential"}).json()
     assert listed["total"] == 1
+    comparison = client.get(f"/api/runs/{run_ids[1]}/compare/{run_ids[0]}").json()
+    assert comparison["changes"] == [] and comparison["regressions"] == 0 and comparison["unchanged"] == len(plan["cases"])
+
+
+def test_blocked_readiness_is_reported_with_the_exact_reason(client: TestClient, db, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A case that cannot run is never executed and never passes: the reason is stored with the result."""
+    project = _import_demo(client)
+    plan = client.post("/api/plans", json={"project_id": project["id"]}).json()
+    _stub_adapters(monkeypatch)
+    monkeypatch.setattr(
+        WebSecurityAdapter,
+        "readiness",
+        lambda self, ctx, spec: ReadinessReport().block(
+            Readiness.BLOCKED, "Docker is not running (the scanner runs in a container)"
+        ),
+    )
+    executed = []
+    monkeypatch.setattr(WebSecurityAdapter, "execute", lambda self, ctx, spec: executed.append(spec) or CaseOutcome.blocked("x"))
+    preview = client.get(f"/api/plans/{plan['id']}/readiness").json()
+    assert preview["cases"]["SEC-DEP-001"] == {
+        "status": "blocked",
+        "requirements": [],
+        "reasons": ["Docker is not running (the scanner runs in a container)"],
+    }
+    run_id = client.post(f"/api/plans/{plan['id']}/runs").json()["id"]
+    runs.execute_run(uuid.UUID(run_id))
+    result = next(r for r in client.get(f"/api/runs/{run_id}").json()["results"] if r["case"]["key"] == "SEC-DEP-001")
+    assert result["status"] == "blocked" and "Docker is not running" in result["message"] and executed == []
+
+
+def test_run_can_be_cancelled_and_remaining_cases_are_skipped_not_passed(
+    client: TestClient, db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _import_demo(client)
+    plan = client.post("/api/plans", json={"project_id": project["id"]}).json()
+    _stub_adapters(monkeypatch)
+    run_id = client.post(f"/api/plans/{plan['id']}/runs").json()["id"]
+    assert client.post(f"/api/runs/{run_id}/cancel").status_code == 202
+    runs.execute_run(uuid.UUID(run_id))
+    run = client.get(f"/api/runs/{run_id}").json()
+    assert (
+        run["status"] == "cancelled"
+        and run["summary"]["skipped"] == run["summary"]["total"] > 0
+        and run["summary"]["passed"] == 0
+    )
+    assert client.post(f"/api/runs/{run_id}/cancel").status_code == 422  # already finished

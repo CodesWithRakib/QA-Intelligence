@@ -30,6 +30,8 @@ class TestPlan(Base, IdMixin, CreatedMixin):
     notes: Mapped[list[str]] = mapped_column(default=list)
     # Owner opt-in: allow POST/PUT/PATCH/DELETE contract calls against the target.
     allow_mutations: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Dynamic checks run against an isolated local copy that the platform starts for the run.
+    managed_environment: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
     cases: Mapped[list["TestCase"]] = relationship(back_populates="plan", cascade="all, delete-orphan", order_by="TestCase.key")
 

@@ -22,6 +22,8 @@ next-env.d.ts
 # Runtime data: imported projects, evidence, reports, backups (never commit)
 data/
 backups/
+# Generated QA reports list weaknesses of private projects: keep them local
+reports/
 
 # Tooling
 .tools/

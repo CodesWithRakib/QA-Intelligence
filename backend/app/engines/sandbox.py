@@ -83,6 +83,8 @@ class ContainerSpec:
     extra_caps: list[str] = field(default_factory=list)
     # Only for trusted tools that must write to their own image filesystem (e.g. OWASP ZAP). Never for project code.
     read_only_root: bool = True
+    # Join a dedicated per-run network instead of the default bridge (managed test environments).
+    network_name: str | None = None
 
 
 def _docker(args: list[str], timeout: int = 60) -> subprocess.CompletedProcess[str]:
@@ -111,26 +113,7 @@ def run_container(spec: ContainerSpec) -> ContainerResult:
     if not docker_available():
         raise SandboxUnavailable("Docker daemon is not running")
     name = f"qai-{uuid.uuid4().hex[:12]}"
-    args = [
-        "run", "--rm", "--name", name,
-        "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-        *(["--read-only"] if spec.read_only_root else []),
-        "--tmpfs", f"/tmp:rw,nosuid,nodev,size={spec.limits.tmpfs_mb}m",
-        "--cpus", str(spec.limits.cpus), "--memory", f"{spec.limits.memory_mb}m",
-        "--memory-swap", f"{spec.limits.memory_mb}m",
-        "--pids-limit", str(spec.limits.pids_limit),
-        "--network", "bridge" if spec.network else "none",
-        "--user", spec.user,
-        "--env", "HOME=/tmp",
-    ]  # fmt: skip
-    for cap in spec.extra_caps:
-        args += ["--cap-add", cap]
-    for key, value in spec.env.items():
-        args += ["--env", f"{key}={value}"]
-    for mount in spec.mounts:
-        args += ["--mount", mount.as_arg()]
-    if spec.workdir:
-        args += ["--workdir", spec.workdir]
+    args = ["run", "--rm", "--name", name, *_isolation_args(spec)]
     args += [spec.image, *spec.command]
 
     started = time.monotonic()
@@ -150,6 +133,90 @@ def run_container(spec: ContainerSpec) -> ContainerResult:
     duration = int((time.monotonic() - started) * 1000)
     log.info("sandbox run", extra={"image": spec.image, "exit": code, "ms": duration, "network": spec.network})
     return ContainerResult(code, out[-MAX_OUTPUT_CHARS:], err[-MAX_OUTPUT_CHARS:], timed_out, duration)
+
+
+def _isolation_args(spec: ContainerSpec) -> list[str]:
+    """Flags shared by one-shot and long-running containers: every container gets the same hardening."""
+    network = spec.network_name or ("bridge" if spec.network else "none")
+    args = [
+        "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+        *(["--read-only"] if spec.read_only_root else []),
+        "--tmpfs", f"/tmp:rw,nosuid,nodev,size={spec.limits.tmpfs_mb}m",
+        "--cpus", str(spec.limits.cpus), "--memory", f"{spec.limits.memory_mb}m",
+        "--memory-swap", f"{spec.limits.memory_mb}m",
+        "--pids-limit", str(spec.limits.pids_limit),
+        "--network", network,
+        "--env", "HOME=/tmp",
+    ]  # fmt: skip
+    if spec.user:  # empty = the image's own default user (official database images)
+        args += ["--user", spec.user]
+    for cap in spec.extra_caps:
+        args += ["--cap-add", cap]
+    for key, value in spec.env.items():
+        args += ["--env", f"{key}={value}"]
+    for mount in spec.mounts:
+        args += ["--mount", mount.as_arg()]
+    if spec.workdir:
+        args += ["--workdir", spec.workdir]
+    return args
+
+
+def create_network() -> str:
+    """A dedicated bridge network for one managed test environment."""
+    name = f"qai-env-{uuid.uuid4().hex[:10]}"
+    result = _docker(["network", "create", "--driver", "bridge", name])
+    if result.returncode != 0:
+        raise SandboxUnavailable(f"cannot create network: {result.stderr.strip()[:200]}")
+    return name
+
+
+def remove_network(name: str) -> None:
+    try:
+        _docker(["network", "rm", name])
+    except (subprocess.TimeoutExpired, OSError, SandboxUnavailable):
+        log.warning("could not remove network", extra={"network": name})
+
+
+def start_service(spec: ContainerSpec, alias: str, publish: tuple[int, int] | None = None) -> str:
+    """Start a long-running container on the spec's network. ``publish`` = (host port, container port),
+    always bound to 127.0.0.1. Returns the container name; the caller must stop it."""
+    name = f"qai-svc-{alias}-{uuid.uuid4().hex[:8]}"
+    args = ["run", "--detach", "--name", name, "--network-alias", alias, *_isolation_args(spec)]
+    if publish:
+        args += ["--publish", f"127.0.0.1:{publish[0]}:{publish[1]}"]
+    result = _docker([*args, spec.image, *spec.command], timeout=120)
+    if result.returncode != 0:
+        raise SandboxUnavailable(f"could not start {alias}: {result.stderr.strip()[-300:]}")
+    return name
+
+
+def stop_service(name: str) -> None:
+    try:
+        _docker(["rm", "--force", "--volumes", name], timeout=60)
+    except (subprocess.TimeoutExpired, OSError, SandboxUnavailable):
+        log.warning("could not remove container", extra={"container": name})
+
+
+def service_logs(name: str, tail: int = 80) -> str:
+    try:
+        result = _docker(["logs", "--tail", str(tail), name], timeout=30)
+    except (subprocess.TimeoutExpired, OSError, SandboxUnavailable):
+        return ""
+    return (result.stdout + result.stderr)[-8000:]
+
+
+def service_running(name: str) -> bool:
+    try:
+        return _docker(["inspect", "--format", "{{.State.Running}}", name], timeout=20).stdout.strip() == "true"
+    except (subprocess.TimeoutExpired, OSError, SandboxUnavailable):
+        return False
+
+
+def exec_in(name: str, command: list[str], timeout: int = 30) -> int:
+    try:
+        return _docker(["exec", name, *command], timeout=timeout).returncode
+    except (subprocess.TimeoutExpired, OSError, SandboxUnavailable):
+        return 1
 
 
 def create_volume() -> str:

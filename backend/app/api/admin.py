@@ -1,6 +1,7 @@
 """AI configuration, execution settings, system health, agents, integrations and audit log."""
 
 import shutil
+import subprocess
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -8,7 +9,8 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 
-from app import __version__
+from app import __version__, tooling
+from app.adapters.registry import ADAPTERS
 from app.agents.registry import AGENTS, NOT_IMPLEMENTED
 from app.ai import benchmark
 from app.ai.providers import DECLARED_ONLY, PROVIDERS
@@ -17,7 +19,7 @@ from app.api import serializers
 from app.api.deps import Db, PagingDep
 from app.config import get_settings
 from app.domain import ResultStatus, values
-from app.engines import sandbox, security_scan
+from app.engines import android_device, sandbox, security_scan, web_tools
 from app.jobs import queue
 from app.models import (
     AgentExecution,
@@ -291,3 +293,82 @@ def audit_log(db: Db, paging: PagingDep, action: str | None = None) -> dict[str,
     if action:
         query = query.where(AuditEvent.action.like(f"{action.replace('%', '')}%"))
     return paging.page(db, query, serializers.audit_event)
+
+
+@router.get("/system/capabilities")
+def capabilities(db: Db) -> dict[str, Any]:
+    """Adapters, their environment readiness, local tools and current host resources."""
+    settings = get_execution_settings(db)
+    adapters = []
+    for adapter in ADAPTERS:
+        report = adapter.environment(settings)
+        adapters.append(
+            {
+                "name": adapter.name,
+                "title": adapter.title,
+                "agent": adapter.agent,
+                "needs_target": adapter.needs_target,
+                "needs_source": adapter.needs_workspace,
+                **report.as_dict(),
+            }
+        )
+    tools = [
+        {"name": t.name, "purpose": t.purpose, "installed": t.available, "path": str(t.path)}
+        for t in (
+            tooling.java(),
+            tooling.adb(),
+            tooling.emulator(),
+            tooling.aapt2(),
+            tooling.apksigner(),
+            tooling.appium(),
+            tooling.lighthouse(),
+            tooling.sample_apk(),
+        )
+    ]
+    docker_ok = sandbox.docker_available()
+    images = [
+        {"image": image, "present": docker_ok and sandbox.image_present(image)}
+        for image in (
+            *sandbox.RUNTIME_IMAGES.values(),
+            security_scan.TRIVY_IMAGE,
+            security_scan.SEMGREP_IMAGE,
+            security_scan.GITLEAKS_IMAGE,
+            web_tools.K6_IMAGE,
+            web_tools.ZAP_IMAGE,
+        )
+    ]
+    disk = shutil.disk_usage(get_settings().data_dir)
+    return {
+        "adapters": adapters,
+        "tools": tools,
+        "images": images,
+        "android_devices": [{"serial": serial, "state": state} for serial, state in android_device.connected()],
+        "resources": {
+            "free_ram_gb": round(android_device.free_ram_gb(), 1),
+            "free_disk_gb": round(disk.free / 1024**3, 1),
+            "gpu": _gpu(),
+        },
+        "concurrency": "one worker: one browser process, one Android device session and one sandbox job at a time",
+    }
+
+
+def _gpu() -> dict[str, Any] | None:
+    """GPU memory from nvidia-smi when present (used to decide whether a local model fits)."""
+    binary = shutil.which("nvidia-smi")
+    if not binary:
+        return None
+    try:
+        output = (
+            subprocess.run(
+                [binary, "--query-gpu=name,memory.total,memory.used", "--format=csv,noheader,nounits"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            .stdout.strip()
+            .splitlines()[0]
+        )
+        name, total, used = (part.strip() for part in output.split(","))
+        return {"name": name, "vram_total_mb": int(total), "vram_used_mb": int(used)}
+    except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
+        return None

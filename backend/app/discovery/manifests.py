@@ -11,7 +11,7 @@ from app.discovery.types import ComponentInfo
 JS_FRAMEWORKS = {
     "next": "Next.js", "react": "React", "vue": "Vue", "nuxt": "Nuxt", "@angular/core": "Angular",
     "svelte": "Svelte", "@sveltejs/kit": "SvelteKit", "express": "Express", "@nestjs/core": "NestJS",
-    "fastify": "Fastify", "koa": "Koa", "hono": "Hono", "vite": "Vite", "tailwindcss": "Tailwind CSS",
+    "fastify": "Fastify", "koa": "Koa", "hono": "Hono", "vite": "Vite", "astro": "Astro", "tailwindcss": "Tailwind CSS",
     "prisma": "Prisma", "@prisma/client": "Prisma", "drizzle-orm": "Drizzle", "typeorm": "TypeORM",
     "mongoose": "Mongoose", "sequelize": "Sequelize", "electron": "Electron",
     "react-native": "React Native", "expo": "Expo",
@@ -26,7 +26,7 @@ PY_FRAMEWORKS = {
     "streamlit": "Streamlit", "aiohttp": "aiohttp", "tornado": "Tornado", "djangorestframework": "DRF",
 }  # fmt: skip
 PY_TEST_FRAMEWORKS = {"pytest": "pytest", "hypothesis": "Hypothesis", "nose2": "nose2", "tox": "tox"}
-FRONTEND = {"Next.js", "React", "Vue", "Nuxt", "Angular", "Svelte", "SvelteKit", "React Native", "Expo"}
+FRONTEND = {"Astro", "Next.js", "React", "Vue", "Nuxt", "Angular", "Svelte", "SvelteKit", "React Native", "Expo"}
 BACKEND = {
     "Express", "NestJS", "Fastify", "Koa", "Hono", "FastAPI", "Django", "Flask", "Starlette", "aiohttp",
     "Tornado", "DRF", "Spring Boot", "Laravel", "Rails", "ASP.NET Core", "Gin", "Echo", "Fiber",

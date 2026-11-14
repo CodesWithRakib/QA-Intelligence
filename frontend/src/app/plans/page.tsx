@@ -16,12 +16,19 @@ function PlansContent() {
   const [projectId, setProjectId] = useState(initialProject);
   const [targetUrl, setTargetUrl] = useState("");
   const [allowMutations, setAllowMutations] = useState(false);
+  const [managed, setManaged] = useState(false);
   const projects = useQuery({ queryKey: ["projects"], queryFn: () => api<Page<Project>>("/projects?limit=200") });
   const plans = useQuery({
     queryKey: ["plans", projectId],
     queryFn: () => api<Page<TestPlan>>(`/plans${query({ project_id: projectId, limit: 100 })}`),
   });
-  const create = useAction<{ project_id: string; target_url: string | null; allow_mutations: boolean }, TestPlan>("POST", "/plans");
+  const create = useAction<{ project_id: string; target_url: string | null; allow_mutations: boolean; managed_environment: boolean }, TestPlan>("POST", "/plans");
+  const profile = useQuery({
+    queryKey: ["environment-profile", projectId],
+    queryFn: () => api<{ profile: unknown }>(`/projects/${projectId}/environment`),
+    enabled: !!projectId,
+  });
+  const hasProfile = !!profile.data?.profile;
   const selected = projects.data?.items.find((p) => p.id === projectId);
 
   return (
@@ -42,7 +49,7 @@ function PlansContent() {
                   onSubmit={(event) => {
                     event.preventDefault();
                     create.mutate(
-                      { project_id: projectId, target_url: targetUrl.trim() || null, allow_mutations: allowMutations },
+                      { project_id: projectId, target_url: managed ? null : targetUrl.trim() || null, allow_mutations: allowMutations, managed_environment: managed && hasProfile },
                       { onSuccess: (plan) => router.push(`/plans/${plan.id}`) },
                     );
                   }}
@@ -58,6 +65,17 @@ function PlansContent() {
                   <Field label="Target URL" htmlFor="plan-target" hint={selected?.target_url ? `Leave empty to use ${selected.target_url}` : "Leave empty for static analysis only."}>
                     <Input id="plan-target" type="url" placeholder="http://127.0.0.1:8100" value={targetUrl} onChange={(e) => setTargetUrl(e.target.value)} />
                   </Field>
+                  <label className="flex items-start gap-2">
+                    <input type="checkbox" className="mt-1" checked={managed && hasProfile} disabled={!hasProfile} onChange={(e) => setManaged(e.target.checked)} />
+                    <span>
+                      Run against a managed local environment
+                      <span className="block text-xs text-muted">
+                        {hasProfile
+                          ? "The platform starts an isolated copy of the project (own database, generated secrets) and tests that. The target URL above is ignored."
+                          : "Needs an environment profile: add one on the project page."}
+                      </span>
+                    </span>
+                  </label>
                   <label className="flex items-start gap-2">
                     <input type="checkbox" className="mt-1" checked={allowMutations} onChange={(e) => setAllowMutations(e.target.checked)} />
                     <span>

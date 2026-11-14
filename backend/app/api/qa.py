@@ -17,7 +17,7 @@ from app.jobs import queue
 from app.models import Evidence, Project, ProjectVersion, Report, TestCase, TestPlan, TestResult, TestRun
 from app.planning.planner import generate_plan
 from app.reports import service as reports
-from app.runs.service import create_run
+from app.runs.service import create_run, plan_readiness, request_cancel
 from app.services import audit
 
 router = APIRouter(tags=["qa"])
@@ -28,6 +28,7 @@ class PlanCreate(BaseModel):
     name: str | None = Field(default=None, max_length=200)
     target_url: str | None = Field(default=None, max_length=2048)
     allow_mutations: bool = False
+    managed_environment: bool = False
 
 
 class CaseUpdate(BaseModel):
@@ -53,7 +54,12 @@ def create_plan(body: PlanCreate, db: Db) -> dict[str, Any]:
     target = (body.target_url or "").strip() or project.target_url
     if target:
         check_target_authorised(db, target)
-    plan = generate_plan(db, version, target_url=target, name=body.name, allow_mutations=body.allow_mutations)
+    if body.managed_environment:
+        if not (project.test_config or {}).get("environment"):
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "store an environment profile for the project first")
+        target = None  # the run points itself at the environment it starts
+    plan = generate_plan(db, version, target_url=target, name=body.name, allow_mutations=body.allow_mutations,
+                         managed_environment=body.managed_environment)  # fmt: skip
     db.commit()
     return serializers.plan(plan, with_cases=True)
 
@@ -112,6 +118,68 @@ def get_run(run_id: uuid.UUID, db: Db) -> dict[str, Any]:
     return serializers.run(run) | {
         "planned_cases": planned,
         "results": [serializers.result(r) for r in sorted(results, key=lambda r: r.case.key)],
+    }
+
+
+@router.get("/plans/{plan_id}/readiness")
+def get_plan_readiness(plan_id: uuid.UUID, db: Db) -> dict[str, Any]:
+    """What can run right now, and exactly why the rest cannot. Nothing is executed."""
+    return plan_readiness(db, get_or_404(db, TestPlan, plan_id))
+
+
+@router.post("/runs/{run_id}/cancel", status_code=status.HTTP_202_ACCEPTED)
+def cancel_run(run_id: uuid.UUID, db: Db) -> dict[str, Any]:
+    run = request_cancel(db, get_or_404(db, TestRun, run_id))
+    db.commit()
+    return serializers.run(run)
+
+
+@router.get("/runs/{run_id}/compare/{base_run_id}")
+def compare_runs(run_id: uuid.UUID, base_run_id: uuid.UUID, db: Db) -> dict[str, Any]:
+    """Case-by-case comparison of two runs of the same project (regression view)."""
+    head, base = get_or_404(db, TestRun, run_id), get_or_404(db, TestRun, base_run_id)
+    if head.project_id != base.project_id:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "runs belong to different projects")
+
+    def states(run: TestRun) -> dict[str, tuple[str, str]]:
+        rows = db.scalars(select(TestResult).where(TestResult.run_id == run.id).options(selectinload(TestResult.case))).all()
+        return {f"{r.case.category}|{r.case.title}": (r.status, r.case.key) for r in rows}
+
+    before, after = states(base), states(head)
+    changes = []
+    for identity in sorted(before.keys() | after.keys()):
+        old, new = before.get(identity), after.get(identity)
+        if (old and old[0]) != (new and new[0]):
+            kind = (
+                "new"
+                if old is None
+                else "removed"
+                if new is None
+                else (
+                    "regression"
+                    if new[0] == "failed" and old[0] == "passed"
+                    else "fixed"
+                    if new[0] == "passed" and old[0] == "failed"
+                    else "changed"
+                )
+            )
+            changes.append(
+                {
+                    "case": identity.split("|", 1)[1],
+                    "category": identity.split("|", 1)[0],
+                    "kind": kind,
+                    "before": old[0] if old else None,
+                    "after": new[0] if new else None,
+                }
+            )
+    return {
+        "base": serializers.run(base),
+        "head": serializers.run(head),
+        "changes": changes,
+        "regressions": sum(1 for c in changes if c["kind"] == "regression"),
+        "fixed": sum(1 for c in changes if c["kind"] == "fixed"),
+        "unchanged": len(before.keys() & after.keys())
+        - sum(1 for c in changes if c["kind"] in ("regression", "fixed", "changed")),
     }
 
 

@@ -60,10 +60,25 @@ class PlanContext:
     has_git_history: bool = False
     allow_mutations: bool = False
     project_config: dict[str, Any] = field(default_factory=dict)
+    # The platform starts an isolated local copy of the project for the run.
+    managed_environment: bool = False
+
+    @property
+    def has_target(self) -> bool:
+        return bool(self.target_url) or self.managed_environment
+
+    @property
+    def target_label(self) -> str:
+        return "managed local environment" if self.managed_environment else str(self.target_url)
 
     @property
     def inventory(self) -> dict[str, Any]:
         return self.snapshot.inventory
+
+    @property
+    def is_apk(self) -> bool:
+        """An uploaded APK has no source tree: source scanners, builds and web checks do not apply."""
+        return self.source_kind == "apk"
 
     @property
     def frameworks(self) -> set[str]:
@@ -130,7 +145,13 @@ class Adapter:
 def target_readiness(ctx: EngineContext, report: ReadinessReport) -> ReadinessReport:
     """Shared rule for anything that talks to a running application."""
     if not ctx.target_url:
-        return report.block(Readiness.REQUIRES_ENVIRONMENT, "no running target URL is configured for this plan")
+        failure = ctx.run_cache.get("managed_environment_error")
+        reason = (
+            f"the managed test environment did not start: {failure}"
+            if failure
+            else "no running target URL is configured for this plan"
+        )
+        return report.block(Readiness.REQUIRES_ENVIRONMENT, reason)
     try:
         validate_target(ctx.target_url, ctx.settings.allowed_targets)
     except TargetNotAllowed as exc:

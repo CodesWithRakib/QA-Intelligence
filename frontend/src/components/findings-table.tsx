@@ -11,7 +11,8 @@ import type { Category, Finding, Page } from "@/lib/types";
 
 const SEVERITIES = ["critical", "high", "medium", "low", "info"];
 const STATUSES = ["open", "fix_proposed", "fixed", "wont_fix", "false_positive"];
-const CATEGORIES: Category[] = ["functional", "browser", "api", "database", "security", "performance", "accessibility", "product"];
+const CLASSIFICATIONS = ["confirmed_defect", "potential_defect", "ai_hypothesis", "environment_failure"];
+const CATEGORIES: Category[] = ["functional", "build", "browser", "api", "database", "security", "performance", "accessibility", "visual", "compatibility", "android", "product"];
 
 interface Props {
   /** Lock the list to one category (used by the Security / Performance / Accessibility screens). */
@@ -25,14 +26,15 @@ export function FindingsTable({ category: fixedCategory, projectId, initialSever
   const [severity, setSeverity] = useState(initialSeverity);
   const [status, setStatus] = useState("");
   const [category, setCategory] = useState("");
+  const [classification, setClassification] = useState("");
   const [offset, setOffset] = useState(0);
-  const params = { q: search.trim(), severity, finding_status: status, category: fixedCategory ?? category, project_id: projectId, offset, limit: 25 };
+  const params = { q: search.trim(), severity, finding_status: status, classification, category: fixedCategory ?? category, project_id: projectId, offset, limit: 25 };
   const findings = useQuery({ queryKey: ["findings", params], queryFn: () => api<Page<Finding>>(`/findings${query(params)}`) });
   const reset = <T,>(setter: (value: T) => void) => (value: T) => { setter(value); setOffset(0); };
 
   return (
     <>
-      <div className="mb-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="mb-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
         <div>
           <label htmlFor="finding-search" className="sr-only">Search findings</label>
           <Input id="finding-search" type="search" placeholder="Search title or component" value={search} onChange={(e) => reset(setSearch)(e.target.value)} />
@@ -49,6 +51,13 @@ export function FindingsTable({ category: fixedCategory, projectId, initialSever
           <Select id="finding-status" value={status} onChange={(e) => reset(setStatus)(e.target.value)}>
             <option value="">All statuses</option>
             {STATUSES.map((value) => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}
+          </Select>
+        </div>
+        <div>
+          <label htmlFor="finding-classification" className="sr-only">Established as</label>
+          <Select id="finding-classification" value={classification} onChange={(e) => reset(setClassification)(e.target.value)}>
+            <option value="">Confirmed and potential</option>
+            {CLASSIFICATIONS.map((value) => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}
           </Select>
         </div>
         {!fixedCategory && (
@@ -69,7 +78,7 @@ export function FindingsTable({ category: fixedCategory, projectId, initialSever
             </Empty>
           ) : (
             <>
-              <Table label="Findings" head={["Severity", "Finding", "Category", "Status", "Verification", "Confidence", "Tool", "Last seen"]}>
+              <Table label="Findings" head={["Severity", "Finding", "Category", "Established", "Status", "Confidence", "Tool", "Last seen"]}>
                 {data.items.map((finding) => (
                   <tr key={finding.id}>
                     <td><SeverityBadge severity={finding.severity} /></td>
@@ -78,8 +87,8 @@ export function FindingsTable({ category: fixedCategory, projectId, initialSever
                       <span className="block truncate font-mono text-xs text-muted">{finding.affected_component}</span>
                     </td>
                     <td><Badge>{finding.category}</Badge></td>
+                    <td><StateBadge state={finding.classification} /></td>
                     <td><StateBadge state={finding.status} /></td>
-                    <td><StateBadge state={finding.verification_status} /></td>
                     <td className="tabular-nums">{Math.round(finding.confidence * 100)}%</td>
                     <td className="text-muted">{finding.source_tool}</td>
                     <td className="whitespace-nowrap text-muted">{formatDate(finding.last_seen_at)}</td>

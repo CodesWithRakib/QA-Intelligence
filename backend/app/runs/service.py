@@ -26,10 +26,10 @@ from app.adapters.registry import ADAPTERS, adapter_for
 from app.agents.registry import agent_run
 from app.config import get_settings
 from app.db import SessionLocal
-from app.domain import Engine, Readiness, ResultStatus, RunStatus, SourceKind, values
+from app.domain import Engine, FindingStatus, Readiness, ResultStatus, RunStatus, SourceKind, VerificationStatus, values
 from app.engines.base import CaseOutcome, EngineContext
 from app.jobs import queue
-from app.models import Project, ProjectVersion, TestCase, TestPlan, TestResult, TestRun, VisualBaseline
+from app.models import Finding, Project, ProjectVersion, TestCase, TestPlan, TestResult, TestRun, VisualBaseline
 from app.security.ssrf import TargetNotAllowed, validate_target
 from app.services import audit
 from app.services.evidence import to_evidence, upsert_finding
@@ -150,11 +150,29 @@ def _persist(db: Session, run: TestRun, case: TestCase, outcome: CaseOutcome, du
     db.add(result)
     db.flush()
     db.add_all([to_evidence(e, run_id=run.id, result_id=result.id) for e in outcome.evidence])
+    if outcome.status is ResultStatus.PASSED:
+        _resolve_previous_findings(db, run, case)
     for draft in outcome.findings:
         upsert_finding(db, draft, project_id=run.project_id, version_id=run.version_id, run_id=run.id, result_id=result.id)
     _store_baselines(db, run, outcome)
     db.commit()
     return len(outcome.findings)
+
+
+def _resolve_previous_findings(db: Session, run: TestRun, case: TestCase) -> None:
+    """The same check now passes: findings it raised earlier in this project are no longer reproduced."""
+    earlier = db.scalars(
+        select(Finding)
+        .join(TestResult, Finding.result_id == TestResult.id)
+        .join(TestCase, TestResult.case_id == TestCase.id)
+        .where(Finding.project_id == run.project_id, Finding.status == FindingStatus.OPEN.value,
+               TestCase.category == case.category, TestCase.title == case.title)
+    ).all()  # fmt: skip
+    for finding in earlier:
+        finding.status = FindingStatus.FIXED.value
+        finding.verification_status = VerificationStatus.VERIFIED_FIXED.value
+        audit.record(db, "finding.no_longer_reproduced", "finding", finding.id, actor=audit.SYSTEM, run_id=str(run.id),
+                     case=case.key)  # fmt: skip
 
 
 def summarise(db: Session, run_id: uuid.UUID) -> dict[str, int]:
@@ -229,7 +247,7 @@ def execute_run(run_id: uuid.UUID, job_id: uuid.UUID | None = None) -> None:
 def _cleanup(ctx: EngineContext) -> dict[str, Any]:
     """Every adapter releases what it acquired. A failing cleanup is recorded, never hidden."""
     report: dict[str, Any] = {}
-    for adapter in ADAPTERS:
+    for adapter in reversed(ADAPTERS):  # reverse order: stop what depends on a resource before the resource
         try:
             result = adapter.cleanup(ctx)
         except Exception as exc:  # noqa: BLE001 - one failing cleanup must not prevent the others

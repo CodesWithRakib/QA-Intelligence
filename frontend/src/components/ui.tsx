@@ -54,7 +54,10 @@ const STATE_TONES: Record<string, Tone> = {
   completed: "ok", verified: "ok", verified_fixed: "ok", fixed: "ok", succeeded: "ok", ready: "ok", approved: "info",
   running: "info", queued: "idle", proposed: "warn", fix_proposed: "warn", open: "bad", failed: "bad",
   review_rejected: "bad", verification_failed: "bad", rejected: "idle", unavailable: "warn", not_implemented: "idle",
-  timed_out: "warn", cancelled: "idle", wont_fix: "idle", false_positive: "idle", unverified: "idle",
+  timed_out: "warn", cancelled: "idle", confirmed_defect: "bad", potential_defect: "warn", ai_hypothesis: "info",
+  environment_failure: "idle", partially_ready: "info", requires_configuration: "warn", requires_credentials: "warn",
+  requires_source_access: "warn", requires_device: "warn", requires_test_environment: "warn", blocked: "bad", not_applicable: "idle",
+  regression: "bad", changed: "warn", new: "info", removed: "idle", wont_fix: "idle", false_positive: "idle", unverified: "idle",
 };
 
 /** Generic lifecycle state (runs, repairs, findings, jobs). */

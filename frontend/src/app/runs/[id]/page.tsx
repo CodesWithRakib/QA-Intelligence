@@ -8,7 +8,7 @@ import { EvidenceList } from "@/components/evidence";
 import { pollWhile, QueryView, useAction } from "@/components/query";
 import { Badge, Button, Card, ErrorNote, LinkButton, Notice, PageHeader, Pre, RESULT_ORDER, ResultBadge, resultLabel, Select, Stat, StateBadge } from "@/components/ui";
 import { api, formatDate, formatDuration } from "@/lib/api";
-import type { Report, ResultStatus, RunDetail } from "@/lib/types";
+import type { Page, Report, ResultStatus, RunComparison, RunDetail, TestRun } from "@/lib/types";
 
 export default function RunPage() {
   const { id } = useParams<{ id: string }>();
@@ -20,6 +20,20 @@ export default function RunPage() {
     refetchInterval: pollWhile<RunDetail>((data) => data.status === "queued" || data.status === "running"),
   });
   const report = useAction<void, Report>("POST", `/runs/${id}/report`);
+  const cancel = useAction("POST", `/runs/${id}/cancel`);
+  const projectId = run.data?.project_id;
+  const siblings = useQuery({
+    queryKey: ["runs", projectId, "for-compare"],
+    queryFn: () => api<Page<TestRun>>(`/runs?project_id=${projectId}&limit=20`),
+    enabled: !!projectId,
+  });
+  const createdAt = run.data?.created_at;
+  const previous = siblings.data?.items.find((other) => other.id !== id && !!createdAt && other.created_at < createdAt && other.status === "completed");
+  const comparison = useQuery({
+    queryKey: ["run-compare", id, previous?.id],
+    queryFn: () => api<RunComparison>(`/runs/${id}/compare/${previous?.id}`),
+    enabled: !!previous && run.data?.status === "completed",
+  });
 
   return (
     <QueryView query={run}>
@@ -35,6 +49,11 @@ export default function RunPage() {
               actions={
                 <>
                   <StateBadge state={data.status} />
+                  {active && (
+                    <Button variant="danger" disabled={cancel.isPending || data.cancel_requested} onClick={() => cancel.mutate()}>
+                      {data.cancel_requested ? "Cancelling…" : "Cancel run"}
+                    </Button>
+                  )}
                   <LinkButton href={`/findings?project_id=${data.project_id}`}>Findings</LinkButton>
                   <Button variant="primary" disabled={active || report.isPending} onClick={() => report.mutate(undefined, { onSuccess: (r) => router.push(`/reports/${r.id}`) })}>
                     {report.isPending ? "Generating…" : "Generate report"}
@@ -44,7 +63,36 @@ export default function RunPage() {
             />
             <div className="space-y-4">
               {report.isError && <ErrorNote error={report.error} />}
-              {active && <Notice>Run in progress: {data.results.length} of {data.planned_cases} cases have a result. This page refreshes automatically.</Notice>}
+              {cancel.isError && <ErrorNote error={cancel.error} />}
+              {active && (
+                <Notice>
+                  <span className="font-medium">
+                    {data.progress.case ? `Running ${data.progress.index} of ${data.progress.total}: ${data.progress.case}` : "Waiting for the worker…"}
+                  </span>
+                  {data.progress.title && <span className="block">{data.progress.title}</span>}
+                  <span className="block text-xs">
+                    {data.progress.adapter ? `Adapter: ${data.progress.adapter.replaceAll("_", " ")} · ` : ""}
+                    {data.results.length} of {data.planned_cases} cases have a stored result. One case runs at a time; this page refreshes automatically.
+                  </span>
+                </Notice>
+              )}
+              {data.status === "cancelled" && <Notice tone="warn">The run was cancelled. Cases that had not started are recorded as skipped.</Notice>}
+              {comparison.data && comparison.data.changes.length > 0 && (
+                <Card title={`Compared with the previous completed run (${formatDate(comparison.data.base.created_at)})`}>
+                  <p className="mb-2 text-muted">
+                    {comparison.data.regressions} regression(s), {comparison.data.fixed} fixed, {comparison.data.unchanged} unchanged.
+                  </p>
+                  <ul className="space-y-1">
+                    {comparison.data.changes.map((change) => (
+                      <li key={`${change.category}${change.case}`}>
+                        <StateBadge state={change.kind} /> {change.case}{" "}
+                        <span className="text-xs text-muted">({change.before ?? "not planned"} → {change.after ?? "not planned"})</span>
+                      </li>
+                    ))}
+                  </ul>
+                </Card>
+              )}
+              {comparison.data && comparison.data.changes.length === 0 && <Notice>No result changed compared with the previous completed run.</Notice>}
               {data.error && <Notice tone="bad">The run did not complete: {data.error}</Notice>}
               {!active && noVerdict > 0 && (
                 <Notice tone="warn">{noVerdict} check(s) have no verdict (blocked, skipped or not tested). They are not counted as passing.</Notice>

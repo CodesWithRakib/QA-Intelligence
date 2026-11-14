@@ -2,6 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 
+import { CapabilitiesPanel } from "@/components/capabilities";
 import { QueryView } from "@/components/query";
 import { Button, Card, Notice, PageHeader, StateBadge, Table } from "@/components/ui";
 import { api, formatDate } from "@/lib/api";
@@ -57,6 +58,7 @@ export default function SystemPage() {
             </>
           )}
         </QueryView>
+        <CapabilitiesPanel />
         <Card title="Recent background jobs">
           <QueryView query={jobs}>
             {(data) =>

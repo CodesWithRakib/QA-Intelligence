@@ -102,10 +102,10 @@ class _DeviceAdapter(Adapter):
             )
         for problem in android_device.environment_problems():
             report.block(Readiness.REQUIRES_DEVICE, problem)
-        if report.runnable and android_device.free_ram_gb() < android_device.MIN_FREE_RAM_GB:
+        if report.runnable and android_device.free_ram_gb() < settings.android_min_free_ram_gb:
             report.block(Readiness.REQUIRES_DEVICE,
                          f"no device is connected and the emulator cannot be started: {android_device.free_ram_gb():.1f} GB RAM free, "
-                         f"about {android_device.MIN_FREE_RAM_GB:.0f} GB needed")  # fmt: skip
+                         f"about {settings.android_min_free_ram_gb:.1f} GB needed")  # fmt: skip
         return report
 
     def readiness(self, ctx: EngineContext, spec: dict[str, Any]) -> ReadinessReport:

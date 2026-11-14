@@ -19,7 +19,8 @@ from app.services import audit
 from app.services.settings import get_execution_settings
 
 
-def plan_context(db: Session, version: ProjectVersion, *, target_url: str | None, allow_mutations: bool = False) -> PlanContext:
+def plan_context(db: Session, version: ProjectVersion, *, target_url: str | None, allow_mutations: bool = False,
+                 managed_environment: bool = False) -> PlanContext:  # fmt: skip
     snapshot = version.snapshot
     if snapshot is None:
         raise ValueError("version has no architecture snapshot")
@@ -29,7 +30,7 @@ def plan_context(db: Session, version: ProjectVersion, *, target_url: str | None
     return PlanContext(
         snapshot=snapshot, workspace=workspace, target_url=target_url, settings=get_execution_settings(db),
         source_kind=source.kind, has_git_history=has_git, allow_mutations=allow_mutations,
-        project_config=dict(version.project.test_config or {}),
+        project_config=dict(version.project.test_config or {}), managed_environment=managed_environment,
     )  # fmt: skip
 
 
@@ -37,7 +38,10 @@ def _manual_cases(context: PlanContext) -> list[PlannedCase]:
     reason = {"reason": "No automated engine for this area yet; requires manual review."}
     credentials = {"reason": "Requires dedicated test accounts, which are not configured; not automated."}
     manual = []
-    if context.workspace is not None or context.target_url:
+    if context.is_apk:
+        return [PlannedCase("MAN-AND", "Android journeys that need accounts or data entry (login, forms, search, deep links, "
+                            "notifications, camera)", Category.ANDROID, Engine.MANUAL, credentials)]  # fmt: skip
+    if context.workspace is not None or context.has_target:
         manual += [
             PlannedCase("MAN-AUTH", "Authentication, session expiry and logout", Category.SECURITY, Engine.MANUAL, credentials),
             PlannedCase("MAN-AUTH", "Authorization: roles, protected routes and access-denied scenarios", Category.SECURITY,
@@ -45,7 +49,7 @@ def _manual_cases(context: PlanContext) -> list[PlannedCase]:
             PlannedCase("MAN-FUNC", "End-to-end user journeys (registration, CRUD, search/filter, uploads, payments in sandbox)",
                         Category.FUNCTIONAL, Engine.MANUAL, credentials),
         ]  # fmt: skip
-    if context.target_url:
+    if context.has_target:
         manual += [
             PlannedCase("MAN-A11Y", "Keyboard-only navigation, focus visibility and screen-reader review", Category.ACCESSIBILITY,
                         Engine.MANUAL, reason),
@@ -56,8 +60,9 @@ def _manual_cases(context: PlanContext) -> list[PlannedCase]:
 
 
 def generate_plan(db: Session, version: ProjectVersion, *, target_url: str | None, name: str | None = None,
-                  allow_mutations: bool = False) -> TestPlan:  # fmt: skip
-    context = plan_context(db, version, target_url=target_url, allow_mutations=allow_mutations)
+                  allow_mutations: bool = False, managed_environment: bool = False) -> TestPlan:  # fmt: skip
+    context = plan_context(db, version, target_url=target_url, allow_mutations=allow_mutations,
+                           managed_environment=managed_environment)  # fmt: skip
     planned: list[PlannedCase] = []
     notes: list[str] = []
     for adapter in ADAPTERS:
@@ -82,7 +87,8 @@ def generate_plan(db: Session, version: ProjectVersion, *, target_url: str | Non
             engine=item.engine.value, priority=item.priority, origin=Origin.DETERMINISTIC.value, spec=item.spec,
         ))  # fmt: skip
     plan = TestPlan(project_id=version.project_id, version_id=version.id, target_url=target_url,
-                    name=name or f"QA plan for version {version.number}", notes=notes, allow_mutations=allow_mutations)  # fmt: skip
+                    name=name or f"QA plan for version {version.number}", notes=notes, allow_mutations=allow_mutations,
+                    managed_environment=managed_environment)  # fmt: skip
     plan.cases = cases
     db.add(plan)
     db.flush()
@@ -94,7 +100,7 @@ def generate_plan(db: Session, version: ProjectVersion, *, target_url: str | Non
 def _why_not(adapter: str, context: PlanContext) -> str:
     if adapter.startswith(("android", "apk")):
         return "no APK or Android project was found"
-    if context.target_url is None and adapter in {"web_functional", "visual", "accessibility", "web_performance", "api"}:
+    if not context.has_target and adapter in {"web_functional", "visual", "accessibility", "web_performance", "api"}:
         return "no running target URL was provided"
     if context.workspace is None:
         return "no source files were imported"

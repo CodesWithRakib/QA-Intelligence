@@ -12,18 +12,24 @@ import { api } from "@/lib/api";
 import type { Project } from "@/lib/types";
 
 const KINDS = [
-  { value: "local_folder", label: "Local folder", hint: "Absolute path on this PC. Files are copied; the original is never modified." },
+  { value: "local_folder", label: "Source project (local folder)", hint: "Absolute path on this PC. The working tree is copied, including uncommitted changes; the original is never modified." },
+  { value: "git", label: "Git repository (local clone or public GitHub / GitLab URL)", hint: "Shallow clone of the committed HEAD. No credentials are used, so only public remote repositories work." },
   { value: "zip", label: "ZIP upload", hint: "Extracted with path, size and compression-ratio checks." },
-  { value: "openapi", label: "OpenAPI / Swagger file", hint: "A .json, .yaml or .yml specification." },
-  { value: "url", label: "Running website or API (URL only)", hint: "No source code: only browser, API and header checks apply." },
+  { value: "url", label: "Website URL only", hint: "No source code: browser, header, performance and generic API checks apply." },
+  { value: "openapi", label: "API / OpenAPI file", hint: "A .json, .yaml or .yml specification for contract tests." },
+  { value: "apk", label: "Android APK upload", hint: "Static analysis, and dynamic tests on the emulator. The APK is never run on this PC itself." },
 ] as const;
+
+const FILE_KINDS = ["zip", "openapi", "apk"] as const;
+const ACCEPT: Record<string, string> = { zip: ".zip", openapi: ".json,.yaml,.yml", apk: ".apk" };
 
 const schema = z
   .object({
     name: z.string().trim().min(1, "Name is required").max(120),
-    kind: z.enum(["local_folder", "zip", "openapi", "url"]),
+    kind: z.enum(["local_folder", "git", "zip", "openapi", "url", "apk"]),
     description: z.string().max(2000),
     local_path: z.string().max(1024),
+    repository: z.string().max(1024),
     target_url: z.string().max(2048),
     file: z.custom<FileList | undefined>(),
   })
@@ -31,7 +37,10 @@ const schema = z
     if (value.kind === "local_folder" && !value.local_path.trim()) {
       ctx.addIssue({ code: "custom", path: ["local_path"], message: "Folder path is required" });
     }
-    if ((value.kind === "zip" || value.kind === "openapi") && !value.file?.length) {
+    if (value.kind === "git" && !value.repository.trim()) {
+      ctx.addIssue({ code: "custom", path: ["repository"], message: "Repository path or URL is required" });
+    }
+    if ((FILE_KINDS as readonly string[]).includes(value.kind) && !value.file?.length) {
       ctx.addIssue({ code: "custom", path: ["file"], message: "Choose a file" });
     }
     if (value.kind === "url" && !value.target_url.trim()) {
@@ -49,10 +58,11 @@ export default function ImportProjectPage() {
   const client = useQueryClient();
   const form = useForm<FormValues>({
     resolver: zodResolver(schema),
-    defaultValues: { name: "", kind: "local_folder", description: "", local_path: "", target_url: "" },
+    defaultValues: { name: "", kind: "local_folder", description: "", local_path: "", repository: "", target_url: "" },
   });
   const kind = useWatch({ control: form.control, name: "kind" });
   const errors = form.formState.errors;
+  const needsFile = (FILE_KINDS as readonly string[]).includes(kind);
 
   const importProject = useMutation({
     mutationFn: (values: FormValues) => {
@@ -61,9 +71,10 @@ export default function ImportProjectPage() {
       body.set("kind", values.kind);
       body.set("description", values.description);
       if (values.kind === "local_folder") body.set("local_path", values.local_path.trim());
-      if (values.target_url.trim()) body.set("target_url", values.target_url.trim());
+      if (values.kind === "git") body.set("repository", values.repository.trim());
+      if (values.target_url.trim() && values.kind !== "apk") body.set("target_url", values.target_url.trim());
       const file = values.file?.[0];
-      if (file && (values.kind === "zip" || values.kind === "openapi")) body.set("file", file);
+      if (file && needsFile) body.set("file", file);
       return api<Project>("/projects/import", { method: "POST", body });
     },
     onSuccess: async (project) => {
@@ -74,13 +85,13 @@ export default function ImportProjectPage() {
 
   return (
     <>
-      <PageHeader title="Import project" description="Imported content is treated as untrusted: it is analysed statically and only ever executed inside sandbox containers." />
+      <PageHeader title="Import application" description="Imported content is treated as untrusted: it is analysed statically and only ever executed inside sandbox containers or the Android emulator." />
       <Card className="max-w-2xl">
         <form className="space-y-4" noValidate onSubmit={form.handleSubmit((values) => importProject.mutate(values))}>
           <Field label="Project name" htmlFor="name" error={errors.name?.message}>
             <Input id="name" autoComplete="off" aria-invalid={!!errors.name} {...form.register("name")} />
           </Field>
-          <Field label="Source type" htmlFor="kind" hint={KINDS.find((k) => k.value === kind)?.hint}>
+          <Field label="What are you importing?" htmlFor="kind" hint={KINDS.find((k) => k.value === kind)?.hint}>
             <Select id="kind" {...form.register("kind")}>
               {KINDS.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
@@ -92,23 +103,30 @@ export default function ImportProjectPage() {
               <Input id="local_path" spellCheck={false} aria-invalid={!!errors.local_path} {...form.register("local_path")} />
             </Field>
           )}
-          {(kind === "zip" || kind === "openapi") && (
-            <Field label={kind === "zip" ? "ZIP file" : "Specification file"} htmlFor="file" error={errors.file?.message as string | undefined}>
-              <Input id="file" type="file" accept={kind === "zip" ? ".zip" : ".json,.yaml,.yml"} aria-invalid={!!errors.file} {...form.register("file")} />
+          {kind === "git" && (
+            <Field label="Repository" htmlFor="repository" error={errors.repository?.message} hint="A local repository folder (C:\Projects\my-app) or https://github.com/owner/repo. Allowed hosts are set under Execution settings.">
+              <Input id="repository" spellCheck={false} aria-invalid={!!errors.repository} {...form.register("repository")} />
             </Field>
           )}
-          <Field
-            label={kind === "url" ? "Target URL" : "Target URL (optional)"}
-            htmlFor="target_url"
-            error={errors.target_url?.message}
-            hint={<>Where the application is running, for browser and API tests. The host must first be authorised under <Link href="/settings/execution" className="underline">Execution settings</Link>.</>}
-          >
-            <Input id="target_url" type="url" placeholder="http://127.0.0.1:8100" spellCheck={false} aria-invalid={!!errors.target_url} {...form.register("target_url")} />
-          </Field>
+          {needsFile && (
+            <Field label={kind === "zip" ? "ZIP file" : kind === "apk" ? "APK file" : "Specification file"} htmlFor="file" error={errors.file?.message as string | undefined}>
+              <Input id="file" type="file" accept={ACCEPT[kind]} aria-invalid={!!errors.file} {...form.register("file")} />
+            </Field>
+          )}
+          {kind !== "apk" && (
+            <Field
+              label={kind === "url" ? "Target URL" : "Target URL (optional)"}
+              htmlFor="target_url"
+              error={errors.target_url?.message}
+              hint={<>Where the application is running, for browser and API tests. The host must first be authorised under <Link href="/settings/execution" className="underline">Execution settings</Link>.</>}
+            >
+              <Input id="target_url" type="url" placeholder="http://127.0.0.1:8100" spellCheck={false} aria-invalid={!!errors.target_url} {...form.register("target_url")} />
+            </Field>
+          )}
           <Field label="Description (optional)" htmlFor="description" error={errors.description?.message}>
             <Input id="description" {...form.register("description")} />
           </Field>
-          <Notice>Git, GitHub and GitLab imports are not implemented yet. Clone the repository locally and import the folder, or upload a ZIP export.</Notice>
+          {kind === "apk" && <Notice>Android source projects (Gradle, Flutter, React Native) are detected when imported as a folder, ZIP or git repository, but are not built here. Upload the built APK to test the app.</Notice>}
           {importProject.isError && <ErrorNote error={importProject.error} />}
           <div className="flex gap-2">
             <Button type="submit" variant="primary" disabled={importProject.isPending}>

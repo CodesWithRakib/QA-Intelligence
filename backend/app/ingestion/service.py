@@ -1,9 +1,11 @@
-"""Project ingestion: turns a source (folder, ZIP, URL, OpenAPI file) into an immutable version."""
+"""Project ingestion: turns a source (folder, ZIP, git, URL, OpenAPI file, APK) into an immutable version."""
 
 import hashlib
 import re
 import shutil
+import subprocess
 import uuid
+import zipfile
 from pathlib import Path
 
 from sqlalchemy import func, select
@@ -13,6 +15,8 @@ from app.config import get_settings
 from app.discovery.scanner import scan_workspace
 from app.discovery.store import store_snapshot
 from app.domain import SourceKind
+from app.engines import android_static
+from app.ingestion import git_source
 from app.models import Project, ProjectSource, ProjectVersion
 from app.security.archive import ImportLimits, ImportSummary, UnsafeContentError, copy_tree, extract_zip
 from app.security.ssrf import TargetNotAllowed, validate_target
@@ -55,6 +59,28 @@ def _validate_local_folder(raw: str) -> Path:
     return path
 
 
+def _git_state(folder: Path) -> dict[str, object]:
+    """Branch, commit and dirty-file count of a local repository (recorded so results are traceable)."""
+    if not (folder / ".git").exists():
+        return {}
+    try:
+        commit = git_source._git(["rev-parse", "HEAD"], cwd=folder).stdout.strip()
+        branch = git_source._git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=folder).stdout.strip()
+        dirty = len(git_source._git(["status", "--porcelain"], cwd=folder).stdout.splitlines())
+    except (git_source.GitSourceError, OSError, subprocess.TimeoutExpired):
+        return {}
+    return {"commit": commit, "branch": branch, "uncommitted_files": dirty,
+            "note": "the working tree was imported, including uncommitted changes" if dirty else "clean working tree"}  # fmt: skip
+
+
+def _apk_metadata(apk: Path) -> dict[str, object]:
+    """Package facts for the architecture inventory. Missing tools are reported, not hidden."""
+    try:
+        return android_static.analyse(apk).summary()
+    except android_static.ApkAnalysisError as exc:
+        return {"analysis_unavailable": str(exc)}
+
+
 def _create_version(
     db: Session,
     project: Project,
@@ -87,6 +113,7 @@ def import_project(
     upload_path: Path | None = None,
     upload_name: str | None = None,
     url: str | None = None,
+    repository: str | None = None,
 ) -> ProjectVersion:
     """Create a project (with its first version and architecture snapshot) from a source."""
     exec_settings = get_execution_settings(db)
@@ -94,6 +121,7 @@ def import_project(
     workspace_relative: str | None = None
     summary: ImportSummary | None = None
     config: dict[str, object] = {}
+    git_config: dict[str, object] = {}
 
     try:
         if kind is SourceKind.LOCAL_FOLDER:
@@ -124,6 +152,34 @@ def import_project(
             if not url:
                 raise IngestionError("A URL is required.")
             location = url
+        elif kind is SourceKind.APK:
+            if not upload_path:
+                raise IngestionError("An APK file is required.")
+            if not zipfile.is_zipfile(upload_path):
+                raise IngestionError("The file is not a valid APK (not a ZIP archive).")
+            with zipfile.ZipFile(upload_path) as bundle:
+                if "AndroidManifest.xml" not in bundle.namelist():
+                    raise IngestionError("The archive has no AndroidManifest.xml: it is not an Android application package.")
+            workspace, workspace_relative = _new_workspace()
+            data = upload_path.read_bytes()
+            (workspace / "app.apk").write_bytes(data)
+            summary = ImportSummary(file_count=1, size_bytes=len(data))
+            summary._digests.append(("app.apk", hashlib.sha256(data).hexdigest()))
+            summary.finalise()
+            location = upload_name or "app.apk"
+        elif kind is SourceKind.GIT:
+            clone_dir = get_settings().cache_dir / "clones" / uuid.uuid4().hex
+            clone_dir.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                info = git_source.clone(repository or local_path or "", clone_dir, exec_settings.git_allowed_hosts)
+                workspace, workspace_relative = _new_workspace()
+                summary = copy_tree(clone_dir, workspace, _limits(exec_settings))
+            except git_source.GitSourceError as exc:
+                raise IngestionError(str(exc)) from exc
+            finally:
+                shutil.rmtree(clone_dir, ignore_errors=True)
+            location = info.location
+            git_config = {"commit": info.commit, "branch": info.branch, "remote": info.remote}
         else:
             raise IngestionError(f"Source type '{kind.value}' is not supported yet (see compatibility matrix).")
 
@@ -131,7 +187,10 @@ def import_project(
             config = {
                 "excluded_secret_files": summary.excluded_secret_files,
                 "skipped": summary.skipped[:200],
+                **git_config,
             }
+        if kind is SourceKind.LOCAL_FOLDER:
+            config |= _git_state(Path(location))
 
         project = Project(name=name.strip(), slug=_slugify(name), description=description.strip(), target_url=url)
         db.add(project)
@@ -141,7 +200,10 @@ def import_project(
         db.flush()
 
         version = _create_version(db, project, source, summary, workspace_relative)
-        store_snapshot(db, version, scan_workspace(workspace) if workspace else None)
+        scan = scan_workspace(workspace) if workspace else None
+        if scan and kind is SourceKind.APK:
+            scan.inventory["android"]["apk"] = _apk_metadata(workspace / "app.apk") if workspace else {}
+        store_snapshot(db, version, scan)
         audit.record(
             db, "project.imported", "project", project.id,
             kind=kind.value, version=version.number, files=version.file_count,

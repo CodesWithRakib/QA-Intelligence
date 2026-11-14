@@ -149,7 +149,7 @@ if ($Only -in 'all', 'android') {
         Push-Location $appium
         try {
             if (-not (Test-Path 'package.json')) { Set-Content package.json '{"name":"qai-appium","private":true}' }
-            Invoke-Checked 'npm install appium' { npm install --no-audit --no-fund --loglevel=error appium@2 }
+            Invoke-Checked 'npm install appium' { npm install --no-audit --no-fund --loglevel=error appium@latest }
         } finally { Pop-Location }
         Write-Ok 'Appium installed'
     }

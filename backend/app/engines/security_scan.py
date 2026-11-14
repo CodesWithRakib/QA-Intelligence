@@ -6,11 +6,14 @@ run in containers with dropped capabilities and resource limits.
 
 import json
 import re
+import shutil
+import uuid
 from pathlib import Path
 from typing import Any
 
 from packaging.version import InvalidVersion, Version
 
+from app.config import get_settings
 from app.domain import Category, ResultStatus, Severity
 from app.engines import sandbox
 from app.engines.base import CaseOutcome, EngineContext, EvidenceDraft, FindingDraft, mask_secret
@@ -308,26 +311,35 @@ def _gitleaks(ctx: EngineContext, history: bool) -> CaseOutcome:
     if history and (source is None or not (source / ".git").exists()):
         return CaseOutcome(ResultStatus.NOT_APPLICABLE, "the project was not imported from a local git repository")
     assert source
-    command = ["detect", "--source", "/src", "--report-format", "json", "--report-path", "/dev/stdout", "--redact",
-               "--exit-code", "0", "--no-banner", "--log-level", "error"]  # fmt: skip
-    if not history:
-        command.append("--no-git")
-    result = sandbox.run_container(ContainerSpec(
-        image=GITLEAKS_IMAGE, command=command, user="0:0", network=False, mounts=[Mount(str(source), "/src")],
-        timeout_s=ctx.settings.scanner_timeout_s, limits=Limits.from_settings(ctx.settings, memory_mb=1024),
-        # The repository belongs to another user id; git refuses to read it without this.
-        env={"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "safe.directory", "GIT_CONFIG_VALUE_0": "*"},
-    ))  # fmt: skip
-    start = result.stdout.find("[")
+    work = get_settings().cache_dir / "gitleaks" / uuid.uuid4().hex
+    work.mkdir(parents=True)
     try:
-        leaks = json.loads(result.stdout[start:]) if start >= 0 else None
-    except json.JSONDecodeError:
-        leaks = None
+        result = sandbox.run_container(
+            ContainerSpec(
+                image=GITLEAKS_IMAGE,
+                command=["git" if history else "dir", "/src", "--report-format", "json", "--report-path", "/out/report.json",
+                         "--redact", "--exit-code", "0", "--no-banner", "--log-level", "error"],
+                user="0:0",
+                network=False,
+                mounts=[Mount(str(source), "/src"), Mount(str(work), "/out", read_only=False)],
+                timeout_s=ctx.settings.scanner_timeout_s,
+                limits=Limits.from_settings(ctx.settings, memory_mb=1024),
+                # The repository belongs to another user id; git refuses to read it without this.
+                env={"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "safe.directory", "GIT_CONFIG_VALUE_0": "*"},
+            )
+        )  # fmt: skip
+        report = work / "report.json"
+        try:
+            leaks = json.loads(report.read_text(encoding="utf-8")) if report.is_file() else None
+        except json.JSONDecodeError:
+            leaks = None
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
     if leaks is None:
         return CaseOutcome.blocked(f"gitleaks did not complete (exit {result.exit_code}): {result.output[-400:]}")
     findings = []
     for leak in leaks:
-        file, line, rule = str(leak.get("File", "")), leak.get("StartLine", 0), str(leak.get("RuleID", ""))
+        file, line, rule = str(leak.get("File", "")).removeprefix("/src/"), leak.get("StartLine", 0), str(leak.get("RuleID", ""))
         commit = str(leak.get("Commit", ""))[:12]
         where = f"{file}:{line}" + (f" (commit {commit})" if commit else "")
         still_present = bool(commit) and ctx.workspace is not None and (ctx.workspace / file).is_file()

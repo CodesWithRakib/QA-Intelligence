@@ -65,6 +65,7 @@ class Engine(StrEnum):
     DAST = "dast"
     ANDROID_STATIC = "android_static"
     ANDROID_DYNAMIC = "android_dynamic"
+    ENVIRONMENT = "environment"
     MANUAL = "manual"  # documented case with no automated engine -> always not_tested
 
 

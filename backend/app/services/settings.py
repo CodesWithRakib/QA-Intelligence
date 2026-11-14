@@ -35,6 +35,11 @@ class ExecutionSettings(BaseModel):
     android_allow_physical_device: bool = False
     android_boot_timeout_s: int = Field(default=420, ge=60, le=900)
     android_explore_actions: int = Field(default=10, ge=1, le=40)
+    android_emulator_memory_mb: int = Field(default=2048, ge=1024, le=4096)
+    # The emulator is not started unless this much host RAM is free (guest memory plus head-room).
+    android_min_free_ram_gb: float = Field(default=3.0, ge=1.5, le=16)
+    # Remote git hosts that may be cloned (public repositories only; no credentials are ever used).
+    git_allowed_hosts: list[str] = Field(default_factory=lambda: ["github.com", "gitlab.com"], max_length=20)
     max_upload_mb: int = Field(default=100, ge=1, le=1024)
     max_extracted_mb: int = Field(default=300, ge=1, le=4096)
     max_files: int = Field(default=20_000, ge=10, le=200_000)

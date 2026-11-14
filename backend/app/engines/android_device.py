@@ -17,6 +17,7 @@ from typing import Any
 from app import tooling
 from app.config import get_settings
 from app.engines.base import EngineContext, EvidenceDraft
+from app.services.settings import ExecutionSettings
 
 log = logging.getLogger(__name__)
 MIN_FREE_RAM_GB = 3.0
@@ -114,14 +115,15 @@ def _describe(device: Device) -> None:
     device.properties["density_dpi"] = device.shell("wm density").strip().rsplit(": ", 1)[-1]
 
 
-def _start_emulator(boot_timeout_s: int) -> Device:
+def _start_emulator(settings: ExecutionSettings) -> Device:
+    boot_timeout_s, minimum = settings.android_boot_timeout_s, settings.android_min_free_ram_gb
     problems = environment_problems()
     if problems:
         raise DeviceUnavailable("; ".join(problems))
     free = free_ram_gb()
-    if free < MIN_FREE_RAM_GB:
+    if free < minimum:
         raise DeviceUnavailable(
-            f"the emulator needs about {MIN_FREE_RAM_GB:.0f} GB of free RAM and only {free:.1f} GB is available; "
+            f"the emulator needs about {minimum:.1f} GB of free RAM and only {free:.1f} GB is available; "
             "close other applications (browser, IDE) and run again"
         )
     log_path = get_settings().data_dir / "logs" / "emulator.log"
@@ -129,7 +131,7 @@ def _start_emulator(boot_timeout_s: int) -> Device:
     with log_path.open("ab") as sink:
         process = subprocess.Popen(  # noqa: S603 - fixed argv
             [str(tooling.emulator().path), "-avd", tooling.AVD_NAME, "-no-window", "-no-audio", "-no-boot-anim",
-             "-no-snapshot-save", "-gpu", "swiftshader_indirect", "-memory", "2048", "-cores", "2", "-netfast"],
+             "-no-snapshot-save", "-gpu", "swiftshader_indirect", "-memory", str(settings.android_emulator_memory_mb), "-cores", "2", "-netfast"],
             stdout=sink, stderr=subprocess.STDOUT, env=tooling.android_env(),
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
         )  # fmt: skip
@@ -176,7 +178,7 @@ def acquire(ctx: EngineContext) -> Device:
         else:
             if physical:
                 log.info("physical device connected but not authorised in execution settings; using the emulator")
-            device = _start_emulator(ctx.settings.android_boot_timeout_s)
+            device = _start_emulator(ctx.settings)
         _describe(device)
     except DeviceUnavailable as exc:
         ctx.run_cache[CACHE_KEY] = exc

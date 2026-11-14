@@ -12,9 +12,10 @@ from app.api import serializers
 from app.api.deps import Db, PagingDep, get_or_404
 from app.config import get_settings
 from app.domain import SourceKind
+from app.engines.environment import EnvironmentProfile
 from app.ingestion.service import check_target_authorised, import_project
 from app.jobs import queue
-from app.models import Finding, Project, ProjectVersion, TestRun
+from app.models import Finding, Project, ProjectVersion, TestRun, VisualBaseline
 from app.services import audit
 from app.services.settings import get_execution_settings
 
@@ -75,6 +76,7 @@ async def import_new_project(
     description: Annotated[str, Form(max_length=2000)] = "",
     local_path: Annotated[str | None, Form(max_length=1024)] = None,
     target_url: Annotated[str | None, Form(max_length=2048)] = None,
+    repository: Annotated[str | None, Form(max_length=1024)] = None,
     file: Annotated[UploadFile | None, File()] = None,
 ) -> dict[str, Any]:
     target_url = (target_url or "").strip() or None
@@ -84,11 +86,11 @@ async def import_new_project(
         check_target_authorised(db, target_url)
     upload_path: Path | None = None
     try:
-        if kind in (SourceKind.ZIP, SourceKind.OPENAPI):
+        if kind in (SourceKind.ZIP, SourceKind.OPENAPI, SourceKind.APK):
             if file is None:
                 raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "a file upload is required for this source type")
             upload_path = await _save_upload(file, get_execution_settings(db).max_upload_mb * 1024 * 1024)
-        version = import_project(db, name=name, kind=kind, description=description, local_path=local_path,
+        version = import_project(db, name=name, kind=kind, description=description, local_path=local_path, repository=repository,
                                  upload_path=upload_path, upload_name=file.filename if file else None, url=target_url)  # fmt: skip
     finally:
         if upload_path:
@@ -126,3 +128,43 @@ def request_ai_summary(project_id: uuid.UUID, db: Db) -> dict[str, Any]:
     audit.record(db, "ai.summary_requested", "project", project_id)
     db.commit()
     return {"job_id": job.id}
+
+
+@router.get("/{project_id}/baselines")
+def list_baselines(project_id: uuid.UUID, db: Db) -> dict[str, Any]:
+    get_or_404(db, Project, project_id)
+    rows = db.scalars(select(VisualBaseline).where(VisualBaseline.project_id == project_id).order_by(VisualBaseline.key)).all()
+    return {
+        "items": [
+            {"id": b.id, "key": b.key, "width": b.width, "height": b.height, "sha256": b.sha256, "created_at": b.created_at}
+            for b in rows
+        ]
+    }
+
+
+@router.post("/{project_id}/baselines/reset")
+def reset_baselines(project_id: uuid.UUID, db: Db) -> dict[str, Any]:
+    """Accept the current design: stored baselines are dropped and the next run captures new ones."""
+    get_or_404(db, Project, project_id)
+    rows = db.scalars(select(VisualBaseline).where(VisualBaseline.project_id == project_id)).all()
+    for row in rows:
+        db.delete(row)
+    audit.record(db, "visual.baselines_reset", "project", project_id, count=len(rows))
+    db.commit()
+    return {"removed": len(rows)}
+
+
+@router.get("/{project_id}/environment")
+def get_environment_profile(project_id: uuid.UUID, db: Db) -> dict[str, Any]:
+    return {"profile": (get_or_404(db, Project, project_id).test_config or {}).get("environment")}
+
+
+@router.put("/{project_id}/environment")
+def put_environment_profile(project_id: uuid.UUID, body: EnvironmentProfile, db: Db) -> dict[str, Any]:
+    """Store the non-secret recipe for running an isolated local copy of the project."""
+    project = get_or_404(db, Project, project_id)
+    project.test_config = {**(project.test_config or {}), "environment": body.model_dump()}
+    audit.record(db, "project.environment_profile_saved", "project", project.id, apps=[a.name for a in body.apps],
+                 services=[s.image for s in body.services])  # fmt: skip
+    db.commit()
+    return {"profile": project.test_config["environment"]}

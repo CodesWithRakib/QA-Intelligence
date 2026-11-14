@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-from app.discovery import manifests, routes
+from app.discovery import android, manifests, routes
 from app.discovery.types import ComponentInfo, EndpointInfo, RouteInfo, ScanResult
 from app.security.archive import EXCLUDED_DIRS
 
@@ -99,6 +99,30 @@ def _test_commands(components: list[ComponentInfo], test_files: list[str]) -> li
     return commands
 
 
+# Files whose presence is characteristic of a framework (second signal next to the dependency manifest).
+CONFIG_SIGNALS = {
+    "next.config": "Next.js", "nuxt.config": "Nuxt", "angular.json": "Angular", "svelte.config": "Svelte",
+    "astro.config": "Astro", "vite.config": "Vite", "nest-cli.json": "NestJS", "manage.py": "Django",
+    "artisan": "Laravel", "wp-config.php": "WordPress", "wp-config-sample.php": "WordPress", "tailwind.config": "Tailwind CSS",
+}  # fmt: skip
+
+
+def framework_evidence(components: list[ComponentInfo], rels: list[str]) -> dict[str, set[str]]:
+    evidence: dict[str, set[str]] = {}
+    for component in components:
+        manifest = f"{component.path + '/' if component.path else ''}{component.details.get('manifest', 'manifest')}"
+        for framework in component.frameworks:
+            evidence.setdefault(framework, set()).add(f"dependency in {manifest}")
+    for rel in rels:
+        name = PurePosixPath(rel).name
+        for prefix, framework in CONFIG_SIGNALS.items():
+            if name == prefix or name.startswith(prefix + "."):
+                evidence.setdefault(framework, set()).add(f"config file {rel}")
+        if rel.startswith("wp-content/") or "/wp-content/themes/" in rel:
+            evidence.setdefault("WordPress", set()).add("wp-content directory")
+    return evidence
+
+
 def scan_workspace(root: Path) -> ScanResult:
     files = _walk(root)
     language_files: Counter[str] = Counter()
@@ -153,6 +177,7 @@ def scan_workspace(root: Path) -> ScanResult:
             endpoints += api_routes
 
     rels = [rel for rel, _, _ in files]
+    evidence = framework_evidence(components, rels)
     test_files = [rel for rel in rels if TEST_FILE.search(rel)]
     code_languages = [lang for lang in language_files if lang not in MARKUP]
     unsupported = [
@@ -171,7 +196,9 @@ def scan_workspace(root: Path) -> ScanResult:
         "languages": [
             {"name": lang, "files": count, "bytes": language_bytes[lang]} for lang, count in language_files.most_common()
         ],
-        "frameworks": sorted({fw for c in components for fw in c.frameworks}),
+        "frameworks": sorted(evidence),
+        # Why each framework was reported: several independent signals are stronger than one dependency name.
+        "framework_evidence": {name: sorted(signals) for name, signals in sorted(evidence.items())},
         "package_managers": sorted({c.details.get("package_manager", "") for c in components} - {""}),
         "test_frameworks": sorted({t for c in components for t in c.details.get("test_frameworks", [])}),
         "test_files": {"count": len(test_files), "sample": test_files[:25]},
@@ -184,6 +211,15 @@ def scan_workspace(root: Path) -> ScanResult:
         "data_models": models[:MAX_LIST],
         "migrations": sorted({m.group(0).strip("/") for rel in rels if (m := MIGRATION_DIR.search(rel))}),
         "env_var_names": sorted(env)[:MAX_LIST],
+        "android": android.detect(files),
+        "root_node": next(
+            (
+                {"package_manager_spec": c.details.get("package_manager_spec", ""), "has_lockfile": c.details.get("has_lockfile")}
+                for c in components
+                if c.path == "" and c.details.get("manifest") == "package.json"
+            ),
+            None,
+        ),  # fmt: skip
         "openapi_specs": openapi_specs,
         "containers": {
             "dockerfiles": [r for r in rels if PurePosixPath(r).name.startswith("Dockerfile")][:20],

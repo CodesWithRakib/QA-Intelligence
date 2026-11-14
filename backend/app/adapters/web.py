@@ -4,7 +4,17 @@ from typing import Any
 
 from app.adapters.base import Adapter, PlanContext, PlannedCase, PlanResult, ReadinessReport
 from app.domain import Category, Engine, Readiness
-from app.engines import api, browser, browser_extra, database_static, project_tests, sandbox, security_scan, web_tools
+from app.engines import (
+    api,
+    browser,
+    browser_extra,
+    database_static,
+    environment,
+    project_tests,
+    sandbox,
+    security_scan,
+    web_tools,
+)
 from app.engines.base import CaseOutcome, EngineContext
 from app.services.settings import ExecutionSettings
 
@@ -33,7 +43,7 @@ class WebDetectionAdapter(Adapter):
 
     def capabilities(self, plan: PlanContext) -> list[str]:
         detected = sorted(plan.frameworks & WEB_FRAMEWORKS)
-        if plan.target_url and not detected:
+        if plan.has_target and not detected:
             detected.append("running website (framework unknown: no source)")
         return detected
 
@@ -56,7 +66,7 @@ class ProjectPipelineAdapter(Adapter):
         return None
 
     def capabilities(self, plan: PlanContext) -> list[str]:
-        if plan.workspace is None:
+        if plan.workspace is None or plan.is_apk:
             return []
         found = [f"python: {c['command']}" for c in plan.inventory.get("test_commands", []) if c["runtime"] == "python"]
         node = self._root_node(plan)
@@ -112,7 +122,7 @@ class _BrowserAdapter(Adapter):
     needs_target = True
 
     def capabilities(self, plan: PlanContext) -> list[str]:
-        return [f"running target {plan.target_url}"] if plan.target_url else []
+        return [f"running target {plan.target_label}"] if plan.has_target else []
 
     def environment(self, settings: ExecutionSettings) -> ReadinessReport:
         return ReadinessReport(requirements=["one headless browser process"])
@@ -187,7 +197,7 @@ class WebPerformanceAdapter(Adapter):
     needs_target = True
 
     def capabilities(self, plan: PlanContext) -> list[str]:
-        return [f"running target {plan.target_url}"] if plan.target_url else []
+        return [f"running target {plan.target_label}"] if plan.has_target else []
 
     def plan(self, plan: PlanContext) -> PlanResult:
         result = PlanResult()
@@ -195,8 +205,7 @@ class WebPerformanceAdapter(Adapter):
                                   Engine.BROWSER, {"check": "web_performance", "path": "/"}, 3))  # fmt: skip
         result.cases.append(_case(self, "PERF-LH", "Lighthouse audit: performance, accessibility, best practices, SEO",
                                   Category.PERFORMANCE, Engine.LIGHTHOUSE, {"path": "/"}, 3))  # fmt: skip
-        assert plan.target_url
-        if web_tools.is_local_target(plan.target_url):
+        if plan.managed_environment or web_tools.is_local_target(str(plan.target_url)):
             result.cases.append(_case(self, "PERF-LOAD", f"Bounded load test with k6 ({plan.settings.load_test_vus} users, "
                                       f"{plan.settings.load_test_duration_s}s)", Category.PERFORMANCE, Engine.LOAD_TEST,
                                       {"path": "/"}, 3))  # fmt: skip
@@ -229,16 +238,16 @@ class WebSecurityAdapter(Adapter):
 
     def capabilities(self, plan: PlanContext) -> list[str]:
         found = []
-        if plan.workspace is not None:
+        if plan.workspace is not None and not plan.is_apk:
             found += ["dependency audit", "secret scan", "static analysis"]
-        if plan.target_url:
+        if plan.has_target:
             found += ["security headers", "cookie flags", "CORS", "passive scan"]
         return found
 
     def plan(self, plan: PlanContext) -> PlanResult:
         result = PlanResult()
         add = result.cases.append
-        if plan.workspace is not None:
+        if plan.workspace is not None and not plan.is_apk:
             add(_case(self, "SEC-DEP", "Known vulnerabilities in declared dependencies (Trivy)", Category.SECURITY,
                       Engine.DEPENDENCY_SCAN, priority=1))  # fmt: skip
             add(_case(self, "SEC-SAST", "Static application security testing (Semgrep, p/default rules)", Category.SECURITY,
@@ -260,14 +269,14 @@ class WebSecurityAdapter(Adapter):
             if containers.get("dockerfiles") or containers.get("compose_services"):
                 add(_case(self, "SEC-CONF", "Container and infrastructure configuration (Trivy misconfig)", Category.SECURITY,
                           Engine.STATIC_ANALYSIS, {"tool": "trivy-config"}))  # fmt: skip
-        if plan.target_url:
+        if plan.has_target:
             add(_case(self, "SEC-HDR", "Recommended HTTP security headers are present", Category.SECURITY, Engine.API,
                       {"check": "security_headers"}))  # fmt: skip
             add(_case(self, "SEC-COOKIE", "Cookies set by the start page carry HttpOnly / SameSite / Secure", Category.SECURITY,
                       Engine.API, {"check": "cookie_flags"}))  # fmt: skip
             add(_case(self, "SEC-CORS", "CORS does not grant access to an untrusted origin", Category.SECURITY, Engine.API,
                       {"check": "cors", "path": "/"}))  # fmt: skip
-            if web_tools.is_local_target(plan.target_url):
+            if plan.managed_environment or web_tools.is_local_target(str(plan.target_url)):
                 add(_case(self, "SEC-DAST", "OWASP ZAP baseline (spider + passive rules, no active attacks)", Category.SECURITY,
                           Engine.DAST, priority=3))  # fmt: skip
             else:
@@ -314,7 +323,7 @@ class ApiAdapter(Adapter):
     needs_target = True
 
     def capabilities(self, plan: PlanContext) -> list[str]:
-        if not plan.target_url:
+        if not plan.has_target:
             return []
         operations = sum(1 for e in plan.snapshot.api_endpoints if e.origin == "openapi")
         return [f"{operations} OpenAPI operation(s)" if operations else "generic HTTP checks (no OpenAPI specification)"]
@@ -377,3 +386,39 @@ class DatabaseAdapter(Adapter):
 
     def execute(self, ctx: EngineContext, spec: dict[str, Any]) -> CaseOutcome:
         return database_static.run_case(ctx, spec)
+
+
+class EnvironmentAdapter(Adapter):
+    """Starts the isolated local copy of the project that the dynamic checks of this run will use."""
+
+    name, title, agent = "environment", "Managed test environment", "orchestrator"
+    needs_workspace = True
+
+    def capabilities(self, plan: PlanContext) -> list[str]:
+        return ["isolated local environment"] if plan.managed_environment else []
+
+    def plan(self, plan: PlanContext) -> PlanResult:
+        return PlanResult(
+            [_case(self, "ENV", "Project starts from a clean copy: services, migrations/seed and application processes",
+                   Category.BUILD, Engine.ENVIRONMENT, priority=1)],
+            ["Dynamic checks run against an isolated copy started by the platform (generated secrets, its own database, "
+             "no access to the project's real .env files). Results describe the code, not any deployed environment."],
+        )  # fmt: skip
+
+    def environment(self, settings: ExecutionSettings) -> ReadinessReport:
+        report = ReadinessReport(requirements=["Docker", "about 2.5 GB of container memory"])
+        if not sandbox.docker_available():
+            report.block(Readiness.BLOCKED, "Docker is not running")
+        return report
+
+    def readiness(self, ctx: EngineContext, spec: dict[str, Any]) -> ReadinessReport:
+        report = super().readiness(ctx, spec)
+        if not ctx.project_config.get("environment"):
+            report.block(Readiness.REQUIRES_CONFIGURATION, "no environment profile is stored for this project")
+        return report
+
+    def execute(self, ctx: EngineContext, spec: dict[str, Any]) -> CaseOutcome:
+        return environment.start_case(ctx)
+
+    def cleanup(self, ctx: EngineContext) -> dict[str, Any]:
+        return environment.down(ctx)

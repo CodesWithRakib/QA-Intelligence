@@ -26,7 +26,10 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _ENVIRONMENT_MARKERS = re.compile(
     r"ECONNREFUSED|ENOTFOUND|EAI_AGAIN|getaddrinfo|connect ETIMEDOUT|Connection refused|could not connect to server"
     r"|DATABASE_URL|Missing required environment|Invalid environment variables|is not defined in the environment"
-    r"|Redis connection|ERR_SOCKET_CONNECTION_TIMEOUT|fetch failed",
+    r"|Redis connection|ERR_SOCKET_CONNECTION_TIMEOUT|fetch failed"
+    # Sandbox tooling problems: never evidence of a defect in the project.
+    r"|Unable to find package manager binary|cannot find binary path|ERR_PNPM_IGNORED_BUILDS|EROFS: read-only file system"
+    r"|ENOSPC|Cannot find native binding|Failed to load native binding|not found: (pnpm|npm|yarn|turbo)",
     re.IGNORECASE,
 )
 PYTHON_INSTALL = (
@@ -41,8 +44,14 @@ _ENV = {
         "CI": "1", "npm_config_cache": "/tmp/npm", "npm_config_update_notifier": "false", "NEXT_TELEMETRY_DISABLED": "1",
         "TURBO_TELEMETRY_DISABLED": "1", "DO_NOT_TRACK": "1", "NODE_OPTIONS": "--max-old-space-size=2048",
         "FORCE_COLOR": "0",
+        # Build orchestrators (turbo, nx, lerna) spawn the package manager by name: it must be on PATH.
+        "PATH": "/work/.qai-pm/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     },
 }  # fmt: skip
+# pnpm refuses to finish when a dependency has a build script the project has not approved. In the sandbox that
+# must not block the run: unapproved scripts stay un-run (safer) and are listed in the result notes instead.
+PNPM_FLAGS = "--config.strict-dep-builds=false"
+_IGNORED_BUILDS = re.compile(r"Ignored build scripts: (.+)")
 # Node monorepos (Next.js / NestJS builds, turbo) need far more than the default sandbox limits.
 NODE_LIMITS = {"memory_mb": 2560, "pids_limit": 1024, "tmpfs_mb": 512}
 STEP_CATEGORY = {"test": Category.FUNCTIONAL, "typecheck": Category.BUILD, "lint": Category.BUILD, "build": Category.BUILD}
@@ -86,8 +95,8 @@ def _node_install(package_manager_spec: str, has_lockfile: bool) -> tuple[str, s
         # pnpm is installed from the npm registry at the exact version the project declares.
         install = (
             f"npm install --no-audit --no-fund --loglevel=error --prefix /work/.qai-pm pnpm@{version} && "
-            f"({pm} install --frozen-lockfile || (echo '--- QAI: frozen lockfile install failed, retrying without ---' && "
-            f"{pm} install --no-frozen-lockfile))"
+            f"({pm} install --frozen-lockfile {PNPM_FLAGS} || (echo '--- QAI: frozen lockfile install failed, retrying without ---' && "
+            f"{pm} install --no-frozen-lockfile {PNPM_FLAGS}))"
         )
         return install, pm, notes
     if name == "yarn":
@@ -147,6 +156,8 @@ def _prepare(
         sandbox.remove_volume(volume)
         reason = f"timed out after {settings.sandbox_install_timeout_s}s" if result.timed_out else f"exit {result.exit_code}"
         raise WorkbenchUnavailable(f"dependency installation failed ({reason})", output)
+    if ignored := sorted({name.strip(" .") for line in _IGNORED_BUILDS.findall(output) for name in line.split(",")}):
+        notes.append(f"dependency build scripts not approved by the project were not run: {', '.join(ignored)[:300]}")
     if "QAI: frozen lockfile install failed" in output:
         notes.append("the lockfile is out of date with package.json: installed without --frozen-lockfile")
     return Workbench(volume, image, runtime, workdir, limits, pm, output[-6000:], notes)

@@ -4,8 +4,9 @@ import { useQuery } from "@tanstack/react-query";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 
-import { QueryView } from "@/components/query";
-import { Badge, Card, Empty, LinkButton, Notice, PageHeader, ResultBar, StateBadge, Table } from "@/components/ui";
+import { EnvironmentProfileCard } from "@/components/environment-profile";
+import { QueryView, useAction } from "@/components/query";
+import { Badge, Button, Card, Empty, LinkButton, Notice, PageHeader, ResultBar, StateBadge, Table } from "@/components/ui";
 import { api, formatBytes, formatDate } from "@/lib/api";
 import type { Page, Project, TestPlan, TestRun } from "@/lib/types";
 
@@ -14,6 +15,11 @@ export default function ProjectPage() {
   const project = useQuery({ queryKey: ["project", id], queryFn: () => api<Project>(`/projects/${id}`) });
   const plans = useQuery({ queryKey: ["plans", id], queryFn: () => api<Page<TestPlan>>(`/plans?project_id=${id}`) });
   const runs = useQuery({ queryKey: ["runs", id], queryFn: () => api<Page<TestRun>>(`/runs?project_id=${id}&limit=10`) });
+  const baselines = useQuery({
+    queryKey: ["baselines", id],
+    queryFn: () => api<{ items: { id: string; key: string; width: number; height: number; created_at: string }[] }>(`/projects/${id}/baselines`),
+  });
+  const resetBaselines = useAction("POST", `/projects/${id}/baselines/reset`);
 
   return (
     <QueryView query={project}>
@@ -101,6 +107,34 @@ export default function ProjectPage() {
                               <StateBadge state={run.status} />
                             </div>
                             <ResultBar summary={run.summary} />
+                          </li>
+                        ))}
+                      </ul>
+                    )
+                  }
+                </QueryView>
+              </Card>
+            </div>
+            <div className="mt-4 grid gap-4 lg:grid-cols-2">
+              {data.versions.at(-1)?.has_files && source?.kind !== "apk" && <EnvironmentProfileCard projectId={id} />}
+              <Card
+                title="Visual baselines"
+                action={
+                  <Button disabled={resetBaselines.isPending || !baselines.data?.items.length} onClick={() => resetBaselines.mutate()}>
+                    Accept current design (reset)
+                  </Button>
+                }
+              >
+                <QueryView query={baselines}>
+                  {(page) =>
+                    page.items.length === 0 ? (
+                      <p className="text-muted">No baseline screenshots yet. The first run with a visual check captures them; later runs compare against them.</p>
+                    ) : (
+                      <ul className="space-y-1">
+                        {page.items.map((baseline) => (
+                          <li key={baseline.id}>
+                            <span className="font-mono text-xs">{baseline.key}</span>{" "}
+                            <span className="text-muted">· {baseline.width}×{baseline.height} · {formatDate(baseline.created_at)}</span>
                           </li>
                         ))}
                       </ul>

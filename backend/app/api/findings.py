@@ -11,7 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from app.api import serializers
 from app.api.deps import Db, PagingDep, get_or_404
-from app.domain import Category, FindingStatus, ProposalStatus, Severity, values
+from app.domain import Category, Classification, FindingStatus, ProposalStatus, Severity, values
 from app.jobs import queue
 from app.models import Finding, RepairExecution, RepairProposal
 from app.repair import service as repair
@@ -36,11 +36,11 @@ class Decision(BaseModel):
 def list_findings(
     db: Db, paging: PagingDep,
     project_id: uuid.UUID | None = None, category: Category | None = None, severity: Severity | None = None,
-    finding_status: FindingStatus | None = None, q: Annotated[str | None, Query(max_length=200)] = None,
+    finding_status: FindingStatus | None = None, classification: Classification | None = None, q: Annotated[str | None, Query(max_length=200)] = None,
 ) -> dict[str, Any]:  # fmt: skip
     query = select(Finding).order_by(_SEVERITY_ORDER, Finding.last_seen_at.desc())
     for column, value in ((Finding.project_id, project_id), (Finding.category, category),
-                          (Finding.severity, severity), (Finding.status, finding_status)):  # fmt: skip
+                          (Finding.severity, severity), (Finding.status, finding_status), (Finding.classification, classification)):  # fmt: skip
         if value is not None:
             query = query.where(column == (value.value if hasattr(value, "value") else value))
     if q:

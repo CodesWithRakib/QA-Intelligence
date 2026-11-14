@@ -8,7 +8,8 @@ import { Button, Card, ErrorNote, Field, Input, Notice, PageHeader } from "@/com
 import { api } from "@/lib/api";
 import type { ExecutionSettings } from "@/lib/types";
 
-type NumericKey = Exclude<keyof ExecutionSettings, "allowed_targets">;
+type NumericKey = Exclude<keyof ExecutionSettings, "allowed_targets" | "browsers" | "git_allowed_hosts" | "android_allow_physical_device">;
+const BROWSERS = ["chromium", "firefox", "webkit"];
 
 const GROUPS: { title: string; fields: { key: NumericKey; label: string; hint: string; step?: number }[] }[] = [
   {
@@ -32,6 +33,17 @@ const GROUPS: { title: string; fields: { key: NumericKey; label: string; hint: s
       { key: "api_max_requests_per_run", label: "Request cap per API check", hint: "1 - 1000. Protects targets from unbounded traffic." },
       { key: "perf_samples", label: "Latency samples", hint: "3 - 50, sent sequentially (not a load test)" },
       { key: "perf_slow_threshold_ms", label: "Slow endpoint threshold, p95 (ms)", hint: "50 - 30000" },
+      { key: "load_test_vus", label: "Load test virtual users", hint: "1 - 20. Load tests only run against local targets." },
+      { key: "load_test_duration_s", label: "Load test duration (s)", hint: "5 - 60" },
+    ],
+  },
+  {
+    title: "Android (one emulator or device session at a time)",
+    fields: [
+      { key: "android_emulator_memory_mb", label: "Emulator memory (MB)", hint: "1024 - 4096" },
+      { key: "android_min_free_ram_gb", label: "Free host RAM required to start the emulator (GB)", hint: "1.5 - 16", step: 0.1 },
+      { key: "android_boot_timeout_s", label: "Emulator boot timeout (s)", hint: "60 - 900" },
+      { key: "android_explore_actions", label: "UI exploration actions", hint: "1 - 40 taps on the first screen" },
     ],
   },
   {
@@ -47,6 +59,8 @@ const GROUPS: { title: string; fields: { key: NumericKey; label: string; hint: s
 function SettingsForm({ initial }: { initial: ExecutionSettings }) {
   const [values, setValues] = useState(initial);
   const [targets, setTargets] = useState(initial.allowed_targets.join("\n"));
+  const [gitHosts, setGitHosts] = useState(initial.git_allowed_hosts.join("\n"));
+  const lines = (text: string) => text.split("\n").map((line) => line.trim()).filter(Boolean);
   const save = useAction<ExecutionSettings, ExecutionSettings>("PUT", "/settings/execution");
 
   return (
@@ -54,7 +68,7 @@ function SettingsForm({ initial }: { initial: ExecutionSettings }) {
       className="space-y-4"
       onSubmit={(event) => {
         event.preventDefault();
-        save.mutate({ ...values, allowed_targets: targets.split("\n").map((line) => line.trim()).filter(Boolean) });
+        save.mutate({ ...values, allowed_targets: lines(targets), git_allowed_hosts: lines(gitHosts) });
       }}
     >
       <Card title="Authorised targets">
@@ -73,6 +87,50 @@ function SettingsForm({ initial }: { initial: ExecutionSettings }) {
             onChange={(event) => setTargets(event.target.value)}
           />
         </Field>
+      </Card>
+      <Card title="Browsers, git hosts and devices">
+        <div className="space-y-4">
+          <fieldset>
+            <legend className="mb-1 text-sm font-medium">Browsers used for cross-browser checks (run one at a time)</legend>
+            <div className="flex flex-wrap gap-4">
+              {BROWSERS.map((name) => (
+                <label key={name} className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={values.browsers.includes(name)}
+                    disabled={name === "chromium"}
+                    onChange={(event) =>
+                      setValues({ ...values, browsers: event.target.checked ? [...values.browsers, name] : values.browsers.filter((b) => b !== name) })
+                    }
+                  />
+                  {name}
+                </label>
+              ))}
+            </div>
+          </fieldset>
+          <Field label="Git hosts that may be cloned (one per line)" htmlFor="git-hosts" hint="Public repositories only: stored credentials are never used.">
+            <textarea
+              id="git-hosts"
+              rows={2}
+              spellCheck={false}
+              className="w-full rounded-md border border-line bg-surface px-2.5 py-1.5 font-mono text-sm"
+              value={gitHosts}
+              onChange={(event) => setGitHosts(event.target.value)}
+            />
+          </Field>
+          <label className="flex items-start gap-2">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={values.android_allow_physical_device}
+              onChange={(event) => setValues({ ...values, android_allow_physical_device: event.target.checked })}
+            />
+            <span>
+              Allow testing on a connected physical Android device
+              <span className="block text-xs text-muted">Off by default. When on, apps under test are installed on (and later removed from) a device connected with USB debugging.</span>
+            </span>
+          </label>
+        </div>
       </Card>
       {GROUPS.map((group) => (
         <Card key={group.title} title={group.title}>

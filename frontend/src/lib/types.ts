@@ -10,7 +10,36 @@ export type Category =
   | "security"
   | "performance"
   | "accessibility"
-  | "product";
+  | "product"
+  | "visual"
+  | "build"
+  | "compatibility"
+  | "android";
+
+export type ReadinessStatus =
+  | "ready"
+  | "partially_ready"
+  | "requires_configuration"
+  | "requires_credentials"
+  | "requires_source_access"
+  | "requires_device"
+  | "requires_test_environment"
+  | "blocked"
+  | "not_applicable";
+
+export interface ReadinessReport {
+  status: ReadinessStatus;
+  reasons: string[];
+  requirements: string[];
+}
+
+export interface PlanReadiness {
+  cases: Record<string, ReadinessReport>;
+  summary: Partial<Record<ReadinessStatus, number>>;
+  checked_at: string;
+}
+
+export type Classification = "confirmed_defect" | "potential_defect" | "ai_hypothesis" | "environment_failure" | "false_positive";
 
 export interface Page<T> {
   items: T[];
@@ -95,6 +124,7 @@ export interface TestPlan {
   name: string;
   target_url: string | null;
   allow_mutations: boolean;
+  managed_environment: boolean;
   notes: string[];
   case_count: number;
   created_at: string;
@@ -111,6 +141,9 @@ export interface TestRun {
   target_url: string | null;
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
   summary: RunSummary;
+  cancel_requested: boolean;
+  progress: { case?: string; title?: string; adapter?: string; index?: number; total?: number; case_started_at?: string; cleanup?: Record<string, unknown> };
+  readiness: Record<string, ReadinessReport>;
   error: string | null;
   created_at: string;
   started_at: string | null;
@@ -153,6 +186,7 @@ export interface Finding {
   status: "open" | "fix_proposed" | "fixed" | "wont_fix" | "false_positive";
   verification_status: "unverified" | "verified_fixed" | "verification_failed";
   source_tool: string;
+  classification: Classification;
   created_at: string;
   last_seen_at: string;
 }
@@ -206,6 +240,8 @@ export interface FindingDetail extends Finding {
   description: string;
   reproduction_steps: string[];
   remediation: string;
+  expected_behavior: string;
+  actual_behavior: string;
   facts: Record<string, unknown>;
   ai_explanation: string | null;
   evidence: Evidence[];
@@ -350,6 +386,15 @@ export interface ExecutionSettings {
   api_max_requests_per_run: number;
   perf_samples: number;
   perf_slow_threshold_ms: number;
+  browsers: string[];
+  load_test_vus: number;
+  load_test_duration_s: number;
+  android_allow_physical_device: boolean;
+  android_boot_timeout_s: number;
+  android_explore_actions: number;
+  android_emulator_memory_mb: number;
+  android_min_free_ram_gb: number;
+  git_allowed_hosts: string[];
   max_upload_mb: number;
   max_extracted_mb: number;
   max_files: number;
@@ -368,4 +413,22 @@ export interface AuditEvent {
 export interface Integrations {
   source_control: { name: string; status: string; detail: string }[];
   tools: { name: string; purpose: string; image: string | null; status: string }[];
+}
+
+export interface Capabilities {
+  adapters: ({ name: string; title: string; agent: string; needs_target: boolean; needs_source: boolean } & ReadinessReport)[];
+  tools: { name: string; purpose: string; installed: boolean; path: string }[];
+  images: { image: string; present: boolean }[];
+  android_devices: { serial: string; state: string }[];
+  resources: { free_ram_gb: number; free_disk_gb: number; gpu: { name: string; vram_total_mb: number; vram_used_mb: number } | null };
+  concurrency: string;
+}
+
+export interface RunComparison {
+  base: TestRun;
+  head: TestRun;
+  changes: { case: string; category: string; kind: "new" | "removed" | "regression" | "fixed" | "changed"; before: ResultStatus | null; after: ResultStatus | null }[];
+  regressions: number;
+  fixed: number;
+  unchanged: number;
 }

@@ -10,6 +10,14 @@ import { Badge, Button, Card, ErrorNote, Notice, PageHeader, Pre, SeverityBadge,
 import { api, formatDate } from "@/lib/api";
 import type { FindingDetail } from "@/lib/types";
 
+const CLASSIFICATION_NOTE: Record<string, string> = {
+  confirmed_defect: "Confirmed: the platform observed this behaviour itself",
+  potential_defect: "Potential: reported by a tool or heuristic, not independently reproduced",
+  ai_hypothesis: "AI hypothesis: not verified",
+  environment_failure: "Environment: caused by the test environment, not shown to be a defect",
+  false_positive: "False positive",
+};
+
 export default function FindingPage() {
   const { id } = useParams<{ id: string }>();
   const explain = useAction("POST", `/findings/${id}/explanation`);
@@ -37,6 +45,7 @@ export default function FindingPage() {
               actions={
                 <>
                   <SeverityBadge severity={data.severity} />
+                  <StateBadge state={data.classification} />
                   <StateBadge state={data.status} />
                   <StateBadge state={data.verification_status} />
                 </>
@@ -48,6 +57,14 @@ export default function FindingPage() {
                 <Card title="Description">
                   <p className="whitespace-pre-wrap">{data.description}</p>
                 </Card>
+                {(data.expected_behavior || data.actual_behavior) && (
+                  <Card title="Expected and actual behaviour">
+                    <dl className="grid grid-cols-[6rem_1fr] gap-y-1.5">
+                      <dt className="text-muted">Expected</dt><dd>{data.expected_behavior || "-"}</dd>
+                      <dt className="text-muted">Actual</dt><dd>{data.actual_behavior || "-"}</dd>
+                    </dl>
+                  </Card>
+                )}
                 <Card title="Reproduction steps">
                   {data.reproduction_steps.length ? (
                     <ol className="list-decimal space-y-1 pl-5">
@@ -110,6 +127,7 @@ export default function FindingPage() {
                 <Card title="Details">
                   <dl className="grid grid-cols-[6.5rem_1fr] gap-y-1.5">
                     <dt className="text-muted">Category</dt><dd><Badge>{data.category}</Badge></dd>
+                    <dt className="text-muted">Established</dt><dd>{CLASSIFICATION_NOTE[data.classification]}</dd>
                     <dt className="text-muted">Confidence</dt><dd>{Math.round(data.confidence * 100)}%</dd>
                     <dt className="text-muted">Detected by</dt><dd>{data.source_tool}</dd>
                     <dt className="text-muted">First seen</dt><dd>{formatDate(data.created_at)}</dd>

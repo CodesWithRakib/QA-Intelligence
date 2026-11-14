@@ -41,7 +41,7 @@ def case(c: TestCase) -> dict[str, Any]:
 def plan(p: TestPlan, *, with_cases: bool = False) -> dict[str, Any]:
     data: dict[str, Any] = {
         "id": p.id, "project_id": p.project_id, "version_id": p.version_id, "name": p.name,
-        "target_url": p.target_url, "allow_mutations": p.allow_mutations, "notes": p.notes,
+        "target_url": p.target_url, "allow_mutations": p.allow_mutations, "managed_environment": p.managed_environment, "notes": p.notes,
         "case_count": len(p.cases), "created_at": p.created_at,
     }  # fmt: skip
     if with_cases:
@@ -52,6 +52,7 @@ def plan(p: TestPlan, *, with_cases: bool = False) -> dict[str, Any]:
 def run(r: TestRun) -> dict[str, Any]:
     return {"id": r.id, "plan_id": r.plan_id, "project_id": r.project_id, "version_id": r.version_id,
             "plan_name": r.plan.name, "target_url": r.plan.target_url, "status": r.status, "summary": r.summary,
+            "cancel_requested": r.cancel_requested, "progress": r.progress, "readiness": r.readiness,
             "error": r.error, "created_at": r.created_at, "started_at": r.started_at, "finished_at": r.finished_at}  # fmt: skip
 
 
@@ -70,11 +71,12 @@ def finding(f: Finding, *, full: bool = False) -> dict[str, Any]:
         "id": f.id, "project_id": f.project_id, "version_id": f.version_id, "run_id": f.run_id,
         "category": f.category, "severity": f.severity, "title": f.title, "affected_component": f.affected_component,
         "confidence": f.confidence, "status": f.status, "verification_status": f.verification_status,
-        "source_tool": f.source_tool, "created_at": f.created_at, "last_seen_at": f.last_seen_at,
+        "source_tool": f.source_tool, "classification": f.classification, "created_at": f.created_at, "last_seen_at": f.last_seen_at,
     }  # fmt: skip
     if full:
         data |= {"description": f.description, "reproduction_steps": f.reproduction_steps,
-                 "remediation": f.remediation, "facts": f.facts, "ai_explanation": f.ai_explanation,
+                 "remediation": f.remediation, "expected_behavior": f.expected_behavior,
+                 "actual_behavior": f.actual_behavior, "facts": f.facts, "ai_explanation": f.ai_explanation,
                  "evidence": [evidence(e) for e in f.evidence]}  # fmt: skip
     return data
 
